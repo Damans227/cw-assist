@@ -117,13 +117,13 @@ function buildSystem(c) {
   if ((c.promptSystem || '').trim()) {
     return fillTemplate(c.promptSystem, { vendor: v, domain });
   }
-  return `You are helping a support consultant${v === 'our team' ? '' : ` at ${v}`} work a ConnectWise ticket.
+  return `You are helping ${v === 'our team' ? 'a support consultant' : `a support consultant at ${v}`} work a ConnectWise ticket.
 
 Rules:
 - Be concise. Short paragraphs or bullets, no preamble, no sign-off.
 - Only use what is in the thread. If something is not there, say so rather than guessing.
-- Notes marked "internal" are ${v === 'our team' ? 'internal-only' : `${v}-only`}. Use them for
-  context but never phrase anything as if the customer has seen them.${domain ? `
+- Notes marked "internal" are ${v === 'our team' ? 'for internal use only' : `${v}-only`}. Use them
+  for context but never phrase anything as if the customer has seen them.${domain ? `
 - Keep ${domain} specifics exact: versions, config keys, API names, log lines.` : ''}
 - Do not restate the whole thread back.
 
