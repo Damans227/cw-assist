@@ -766,7 +766,7 @@ function drawSettingRepos() {
       <div class="repo-row" data-i="${i}">
         <input class="rn" placeholder="Name" value="${escAttr(r.name)}">
         <input class="ru" placeholder="owner/name or URL" value="${escAttr(r.repo)}">
-        <button class="rx set-btn" title="remove" type="button">&times;</button>
+        <button class="rx" title="remove" type="button">&times;</button>
       </div>`).join('')
     : '<div class="set-state">No repos yet — add one.</div>';
   box.querySelectorAll('.repo-row').forEach(row => {
