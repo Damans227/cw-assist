@@ -470,7 +470,8 @@ async function chat(aiKey, aiBase, aiModel, system, userContent) {
 // A chat opened from a URL selects the model but does NOT switch on the tools
 // attached to it — that is why the same prompt works when typed into an
 // existing chat and fails from here. Set Tool ids in settings (Open WebUI:
-// Workspace -> Tools) and it behaves.
+// Workspace -> Tools) and they are passed as ?tool_ids=[...] so the new chat
+// has them enabled.
 async function handoff(ticketId) {
   const c = await cfg();
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
@@ -482,6 +483,7 @@ then work out what's going on — pull in similar past tickets if any help, plus
 - next diagnostic step
 - next useful thing to check, run, or ask`;
 
-  const tools = c.aiTools ? `&tools=${encodeURIComponent(c.aiTools)}` : '';
+  const ids = (c.aiTools || '').split(',').map(s => s.trim()).filter(Boolean);
+  const tools = ids.length ? `&tool_ids=${encodeURIComponent(JSON.stringify(ids))}` : '';
   return `${root}/?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
 }

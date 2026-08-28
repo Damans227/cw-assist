@@ -824,18 +824,21 @@ async function testModel() {
   }
 }
 
-/* --- built-in prompt defaults, for the "Load built-in" buttons --- */
+/* --- built-in prompt defaults, for the "Load built-in" buttons ---
+   Per-run bits (ticket / company / repo) come back as {{placeholders}} so an
+   edited copy still fills in per ticket; vendor / domain / extra-rules are
+   resolved from the current settings.                                     */
 
-const PROMPT_SAMPLE = { ticket: '1234', company: 'Example Co' };
+const PROMPT_VARS = { ticket: '{{ticket}}', company: '{{company}}' };
 
 function builtinTemplate(name, c) {
   switch (name) {
     case 'system'  : return buildSystem({ ...c, promptSystem: '' });
-    case 'summary' : return buildSummaryPrompt({ ...c, promptSummary: '' }, PROMPT_SAMPLE);
-    case 'standing': return buildStandingPrompt({ ...c, promptStanding: '' }, PROMPT_SAMPLE);
+    case 'summary' : return buildSummaryPrompt({ ...c, promptSummary: '' }, PROMPT_VARS);
+    case 'standing': return buildStandingPrompt({ ...c, promptStanding: '' }, PROMPT_VARS);
     case 'board'   : return buildBoardPrompt({ ...c, promptBoard: '' });
-    case 'issue'   : return buildIssuePrompt({ ...c, promptIssue: '' }, PROMPT_SAMPLE, 'owner/repo');
-    case 'handoff' : return `fetch cw ticket ${PROMPT_SAMPLE.ticket}.
+    case 'issue'   : return buildIssuePrompt({ ...c, promptIssue: '' }, PROMPT_VARS, '{{repo}}');
+    case 'handoff' : return `fetch cw ticket {{ticket}}.
 then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
 - next diagnostic step
 - next useful thing to check, run, or ask`;
