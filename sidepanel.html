@@ -169,9 +169,10 @@
   footer a{ color:var(--accent); font-size:14.5px; font-weight:700; text-decoration:underline;
             text-underline-offset:2px; }
   footer a:hover{ color:var(--accent-dark); }
+  .foot-cfg{ display:flex; gap:14px; align-items:center; }
   .foot-links{ margin-left:auto; display:flex; gap:14px; align-items:center; }
-  .foot-links #cfgExport, .foot-links #cfgImport{ font-size:13px; font-weight:600; color:var(--mute); }
-  .foot-links #cfgExport:hover, .foot-links #cfgImport:hover{ color:var(--accent); }
+  .foot-cfg #cfgExport, .foot-cfg #cfgImport{ font-size:13px; font-weight:600; color:var(--mute); }
+  .foot-cfg #cfgExport:hover, .foot-cfg #cfgImport:hover{ color:var(--accent); }
 </style>
 </head>
 <body>
@@ -207,12 +208,12 @@
 <section id="settingsView" hidden></section>
 
 <footer>
-  <span id="foot"></span>
-  <span class="foot-links">
+  <span class="foot-cfg">
     <a href="#" id="cfgExport" hidden title="download all settings as a JSON file">Export</a>
     <a href="#" id="cfgImport" hidden title="load settings from a JSON file">Import</a>
-    <a href="#" id="settings">Settings</a>
   </span>
+  <span id="foot"></span>
+  <span class="foot-links"><a href="#" id="settings">Settings</a></span>
   <input type="file" id="cfgFile" accept="application/json,.json" hidden>
 </footer>
 
