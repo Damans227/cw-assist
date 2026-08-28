@@ -729,7 +729,7 @@ function openSettings() {
   $('boardRun').hidden = true;
   $('openChat').hidden = true;
   $('settingsView').hidden = false;
-  $('settings').textContent = '← done';
+  $('settings').textContent = '← Done';
   $('num').textContent = 'Settings';
   $('meta').textContent = '';
   $('sum').textContent = '';
@@ -742,7 +742,7 @@ async function closeSettings() {
   $('settingsView').hidden = true;
   $('settingsView').innerHTML = '';
   $('out').hidden = false;
-  $('settings').textContent = 'settings';
+  $('settings').textContent = 'Settings';
   lastKey = '';                          // force a fresh redraw
   setView(await currentView());
 }
