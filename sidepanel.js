@@ -545,7 +545,7 @@ async function showIssueDraft(entry) {
   const { title = '', body = '', company, summary, noteCount, ts, created, repo = '' } = entry;
 
   $('sum').textContent = [company, summary].filter(Boolean).join(' · ');
-  $('meta').textContent = created ? `issue #${created.number} created` : 'issue draft';
+  $('meta').textContent = created ? `Issue #${created.number} created` : 'Issue draft';
   $('foot').textContent = created
     ? `created ${fmtWhen(created.ts)}`
     : `${noteCount ?? '?'} notes${ts ? ' · drafted ' + fmtWhen(ts) : ''} · edit, then Finalize`;
@@ -633,7 +633,7 @@ async function showIssueDraft(entry) {
       $('ghMsg').innerHTML =
         `<span class="ok">Created <a href="${esc(url)}" target="_blank" rel="noreferrer">#${number}</a></span>`;
       $('ghFinalize').textContent = 'Created';
-      $('meta').textContent = `issue #${number} created`;
+      $('meta').textContent = `Issue #${number} created`;
     } catch (e) {
       $('ghFinalize').disabled = false;
       $('ghRegen').disabled = false;
