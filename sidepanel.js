@@ -4,8 +4,9 @@ let ticket = null;
 let view = null;
 let lastKey = '';
 let busy = false;
+let settingsOpen = false;   // while true, the tab poll must not swap the view out
 let boardTab = 'latest';    // 'latest' | 'history' — a view, switching it never calls the model
-let ticketLane = 'summary'; // 'summary' | 'standing' — which question, matches ask()'s PROMPTS keys
+let ticketLane = 'summary'; // 'summary' | 'standing' | 'ghissue' — which lane is showing
 
 /* ---- board summary history, kept in chrome.storage.local ------------ */
 
@@ -259,7 +260,7 @@ async function renderIssueLane() {
   if (!repos.length) {
     $('out').innerHTML =
       '<p class="idle">No GitHub repos configured yet — add one in <a href="#" id="toSettings">settings</a>.</p>';
-    $('toSettings').onclick = e => { e.preventDefault(); chrome.runtime.openOptionsPage(); };
+    $('toSettings').onclick = e => { e.preventDefault(); openSettings(); };
     return;
   }
 
@@ -283,9 +284,29 @@ async function renderIssueLane() {
 
 /* ---- which ticket is on screen ------------------------------------- */
 
+// any ConnectWise-cloud pod: na / eu / au / staging.* etc.
+const CW_HOST = /^https:\/\/([a-z0-9-]+\.)*myconnectwise\.net$/i;
+
+function cwOriginOf(url) {
+  try { const u = new URL(url); return CW_HOST.test(u.origin) ? u.origin : ''; }
+  catch { return ''; }
+}
+
+// fill cwOrigin from the tab we are looking at, but never override a value the
+// user set by hand
+let learnedOrigin = null;
+async function learnOrigin(origin) {
+  if (!origin || learnedOrigin === origin) return;
+  learnedOrigin = origin;
+  const { cwOrigin } = await chrome.storage.local.get('cwOrigin');
+  if (!cwOrigin) await chrome.storage.local.set({ cwOrigin: origin });
+}
+
 async function currentView() {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab || !/eu\.myconnectwise\.net/.test(tab.url || '')) return { view: null, ticket: null };
+  const origin = cwOriginOf(tab?.url);
+  if (!origin) return { view: null, ticket: null };
+  learnOrigin(origin);
   try {
     return await chrome.tabs.sendMessage(tab.id, 'whichTicket');
   } catch {
@@ -325,11 +346,11 @@ function setView(v) {
 }
 
 (async () => setView(await currentView()))();
-setInterval(async () => { if (!busy) setView(await currentView()); }, 1500);
+setInterval(async () => { if (!busy && !settingsOpen) setView(await currentView()); }, 1500);
 
 // the content script also pushes changes as they happen
 chrome.runtime.onMessage.addListener(msg => {
-  if (msg && 'onTicket' in msg && !busy) setView({ view: msg.view, ticket: msg.onTicket });
+  if (msg && 'onTicket' in msg && !busy && !settingsOpen) setView({ view: msg.view, ticket: msg.onTicket });
 });
 
 /* ---- rendering ------------------------------------------------------ */
@@ -483,11 +504,14 @@ async function generateIssueDraft(repo) {
   const tick = setInterval(show, 1000);
 
   try {
-    const res = await askIssue(ticket);
+    const chosen = repo || lastRepoChoice || '';
+    const repos = await loadRepos();
+    const repoName = repos.find(r => r.repo === chosen)?.name?.trim() || chosen;
+    const res = await askIssue(ticket, repoName);
     clearInterval(tick);
     const entry = {
       ts: Date.now(),
-      repo: repo || lastRepoChoice || '',
+      repo: chosen,
       title: res.title, body: res.body,
       company: res.company, summary: res.summary, noteCount: res.noteCount
     };
@@ -689,7 +713,283 @@ $('openChat').onclick = async () => {
   }
 };
 
+/* ---- settings view ----------------------------------------------------
+   Lives inside the panel (there is no popup). Reads/writes the same
+   chrome.storage.local keys cwlib's cfg() merges over DEFAULTS.        */
+
+const escAttr = s => String(s ?? '').replace(/[&"<]/g, c => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;' }[c]));
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+function openSettings() {
+  if (settingsOpen) return;
+  settingsOpen = true;
+  $('out').hidden = true;
+  $('ticketLaneBtns').hidden = true;
+  $('boardBtns').hidden = true;
+  $('boardRun').hidden = true;
+  $('openChat').hidden = true;
+  $('settingsView').hidden = false;
+  $('settings').textContent = '← done';
+  $('num').textContent = 'Settings';
+  $('meta').textContent = '';
+  $('sum').textContent = '';
+  $('foot').textContent = '';
+  renderSettings();
+}
+
+async function closeSettings() {
+  settingsOpen = false;
+  $('settingsView').hidden = true;
+  $('settingsView').innerHTML = '';
+  $('out').hidden = false;
+  $('settings').textContent = 'settings';
+  lastKey = '';                          // force a fresh redraw
+  setView(await currentView());
+}
+
 $('settings').onclick = e => {
   e.preventDefault();
-  chrome.runtime.openOptionsPage();
+  settingsOpen ? closeSettings() : openSettings();
 };
+
+/* --- repos sub-list --- */
+
+let setRepos = [];
+
+const saveSettingRepos = () =>
+  chrome.storage.local.set({ ghRepos: setRepos.filter(r => r.name.trim() || r.repo.trim()) });
+
+function drawSettingRepos() {
+  const box = $('repoList');
+  box.innerHTML = setRepos.length
+    ? setRepos.map((r, i) => `
+      <div class="repo-row" data-i="${i}">
+        <input class="rn" placeholder="Name" value="${escAttr(r.name)}">
+        <input class="ru" placeholder="owner/name or URL" value="${escAttr(r.repo)}">
+        <button class="rx set-btn" title="remove" type="button">&times;</button>
+      </div>`).join('')
+    : '<div class="set-state">No repos yet — add one.</div>';
+  box.querySelectorAll('.repo-row').forEach(row => {
+    const i = +row.dataset.i;
+    row.querySelector('.rn').onchange = e => { setRepos[i].name = e.target.value.trim(); saveSettingRepos(); };
+    row.querySelector('.ru').onchange = e => { setRepos[i].repo = e.target.value.trim(); saveSettingRepos(); };
+    row.querySelector('.rx').onclick  = () => { setRepos.splice(i, 1); saveSettingRepos(); drawSettingRepos(); };
+  });
+}
+
+/* --- model connection test + host permission --- */
+
+const originPattern = base => { try { return new URL(base).origin + '/*'; } catch { return ''; } };
+
+async function refreshPermState(base) {
+  const pat = originPattern(base);
+  const btn = $('setGrant'), st = $('setGrantState');
+  if (!btn) return;
+  if (!pat) { st.textContent = ''; btn.hidden = true; return; }
+  let has = false;
+  try { has = await chrome.permissions.contains({ origins: [pat] }); } catch {}
+  btn.hidden = has;
+  st.textContent = has ? `access granted for ${pat}` : `${pat} — not granted yet`;
+}
+
+async function grantModelAccess() {
+  const { aiBase } = await cfg();
+  const pat = originPattern(aiBase);
+  if (!pat) { $('setGrantState').textContent = 'set a valid server URL first'; return; }
+  try {
+    const ok = await chrome.permissions.request({ origins: [pat] });
+    await refreshPermState(aiBase);
+    if (!ok) $('setGrantState').textContent = 'denied';
+  } catch (e) {
+    $('setGrantState').textContent = String(e.message || e);
+  }
+}
+
+async function testModel() {
+  const st = $('setTestState');
+  st.textContent = 'testing…';
+  const c = await cfg();
+  if (!c.aiBase) { st.textContent = 'set a server URL first'; return; }
+  try {
+    const r = await fetch(`${c.aiBase.replace(/\/+$/, '')}/models`,
+      { headers: c.aiKey ? { Authorization: `Bearer ${c.aiKey}` } : {} });
+    if (!r.ok) { st.textContent = `HTTP ${r.status}`; return; }
+    const j = await r.json();
+    const names = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
+    st.textContent = c.aiModel && names.includes(c.aiModel)
+      ? `reachable · ${c.aiModel} found`
+      : `reachable · ${names.length} model(s), "${c.aiModel || '(none set)'}" not listed`;
+  } catch {
+    st.textContent = 'unreachable — grant access / accept the cert first';
+  }
+}
+
+/* --- built-in prompt defaults, for the "Load built-in" buttons --- */
+
+const PROMPT_SAMPLE = { ticket: '1234', company: 'Example Co' };
+
+function builtinTemplate(name, c) {
+  switch (name) {
+    case 'system'  : return buildSystem({ ...c, promptSystem: '' });
+    case 'summary' : return buildSummaryPrompt({ ...c, promptSummary: '' }, PROMPT_SAMPLE);
+    case 'standing': return buildStandingPrompt({ ...c, promptStanding: '' }, PROMPT_SAMPLE);
+    case 'board'   : return buildBoardPrompt({ ...c, promptBoard: '' });
+    case 'issue'   : return buildIssuePrompt({ ...c, promptIssue: '' }, PROMPT_SAMPLE, 'owner/repo');
+    case 'handoff' : return `fetch cw ticket ${PROMPT_SAMPLE.ticket}.
+then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
+- next diagnostic step
+- next useful thing to check, run, or ask`;
+  }
+  return '';
+}
+
+const promptField = (name, label) => {
+  const key = 'prompt' + cap(name);
+  return `
+    <div class="set-row">
+      <label for="s_${key}">${label}</label>
+      <textarea id="s_${key}" data-key="${key}" placeholder="blank = built-in default"></textarea>
+      <div class="set-inline">
+        <button class="tmpl-reset tmpl-load" data-tmpl="${name}" type="button">Load built-in</button>
+        <button class="tmpl-reset tmpl-clear" data-key="${key}" type="button">Clear</button>
+      </div>
+    </div>`;
+};
+
+async function renderSettings() {
+  const c = await cfg();
+  const v = $('settingsView');
+
+  v.innerHTML = `
+    <div class="set-h">ConnectWise</div>
+    <div class="set-row">
+      <label for="s_cwOrigin">ConnectWise URL</label>
+      <input id="s_cwOrigin" data-key="cwOrigin" placeholder="https://na.myconnectwise.net">
+      <div class="hint">Auto-detected from the open ConnectWise tab. Override only for a non-cloud instance.</div>
+    </div>
+    <div class="set-row">
+      <label for="s_cwApiVersion">API version segment</label>
+      <input id="s_cwApiVersion" data-key="cwApiVersion" placeholder="v2025_1">
+      <div class="hint">The <code>/vYYYY_R/apis/3.0</code> part of the REST path. Bump it after a ConnectWise release.</div>
+    </div>
+    <div class="set-state" id="setCwState"></div>
+
+    <div class="set-h">Model — Open WebUI / OpenAI-compatible</div>
+    <div class="set-row">
+      <label for="s_aiBase">Server</label>
+      <input id="s_aiBase" data-key="aiBase" placeholder="https://webui.example.com/api">
+    </div>
+    <div class="set-row">
+      <label for="s_aiModel">Model</label>
+      <input id="s_aiModel" data-key="aiModel" placeholder="my-model">
+    </div>
+    <div class="set-row">
+      <label for="s_aiKey">API key</label>
+      <input id="s_aiKey" data-key="aiKey" type="password" placeholder="sk-…">
+    </div>
+    <div class="set-row">
+      <label for="s_aiTools">Tool ids (handoff only)</label>
+      <input id="s_aiTools" data-key="aiTools" placeholder="connectwise">
+      <div class="hint">Comma-separated Open WebUI tool ids switched on in chats opened by “Open in chat”.</div>
+    </div>
+    <div class="set-inline">
+      <button class="set-btn" id="setTest" type="button">Test connection</button>
+      <span class="set-state" id="setTestState"></span>
+    </div>
+    <div class="set-inline">
+      <button class="set-btn" id="setGrant" type="button" hidden>Grant access</button>
+      <span class="set-state" id="setGrantState"></span>
+    </div>
+
+    <div class="set-h">Assistant</div>
+    <div class="set-row">
+      <label for="s_vendorName">Your team / company name</label>
+      <input id="s_vendorName" data-key="vendorName" placeholder="e.g. Acme Support">
+      <div class="hint">Labels your side of the thread and appears in the prompts. Blank = neutral wording (“our team”).</div>
+    </div>
+    <div class="set-row">
+      <label for="s_domainFocus">Product / domain focus <span class="hint">(optional)</span></label>
+      <input id="s_domainFocus" data-key="domainFocus" placeholder="e.g. Apache CloudStack">
+      <div class="hint">Told to keep versions, config keys and log lines for this exact.</div>
+    </div>
+    <div class="set-row">
+      <label for="s_boardExtraRules">Extra board-triage rules <span class="hint">(optional)</span></label>
+      <textarea id="s_boardExtraRules" data-key="boardExtraRules" placeholder="e.g. Auto-close tickets in “Awaiting Customer” after 5 days. Ignore the Sandbox board."></textarea>
+      <div class="hint">Appended verbatim to the board triage prompt.</div>
+    </div>
+
+    <div class="set-h">GitHub</div>
+    <div class="set-row">
+      <label>Repositories</label>
+      <div id="repoList"></div>
+      <div class="set-inline"><button class="set-btn" id="repoAdd" type="button">+ Add repo</button></div>
+      <div class="hint">Name is free text; repo is <code>owner/name</code> or a github.com URL. These fill the picker on the GitHub tab.</div>
+    </div>
+    <div class="set-row">
+      <label for="s_ghToken">GitHub token</label>
+      <input id="s_ghToken" data-key="ghToken" type="password" placeholder="ghp_… / github_pat_…">
+      <div class="hint">Personal access token with issue-write on the repos above.</div>
+    </div>
+
+    <details class="set-adv">
+      <summary>Advanced</summary>
+      <div class="set-row">
+        <label for="s_cwAppId">ConnectWise app id</label>
+        <input id="s_cwAppId" data-key="cwAppId" placeholder="bm-manageclient">
+        <div class="hint">The <code>cw-app-id</code> header. Leave as-is unless your instance rejects it.</div>
+      </div>
+      <div class="hint" style="margin:10px 0 4px">
+        Prompt overrides — leave blank to use the built-in default, which already
+        reflects the fields above. Placeholders:
+        <code>{{ticket}} {{company}} {{vendor}} {{domain}} {{repo}} {{extraRules}}</code>.
+      </div>
+      ${promptField('system',   'System prompt')}
+      ${promptField('summary',  'Summary lane')}
+      ${promptField('standing', 'Outstanding lane')}
+      ${promptField('board',    'Board triage')}
+      ${promptField('issue',    'GitHub issue draft')}
+      ${promptField('handoff',  '“Open in chat” prompt')}
+    </details>`;
+
+  // generic bind for every [data-key] field
+  v.querySelectorAll('[data-key]').forEach(el => {
+    el.value = c[el.dataset.key] ?? '';
+    el.addEventListener('change', () => {
+      const val = el.value;                       // textareas keep leading indent
+      chrome.storage.local.set({ [el.dataset.key]: el.tagName === 'TEXTAREA' ? val : val.trim() });
+      if (el.dataset.key === 'aiBase') refreshPermState(el.value.trim());
+    });
+  });
+
+  $('setCwState').textContent = c.clientId
+    ? 'ConnectWise access key stored.'
+    : 'No access key yet — open or reload a ConnectWise tab once.';
+
+  setRepos = (Array.isArray(c.ghRepos) ? c.ghRepos : []).map(r => ({ name: r.name || '', repo: r.repo || '' }));
+  drawSettingRepos();
+  $('repoAdd').onclick = () => {
+    setRepos.push({ name: '', repo: '' });
+    drawSettingRepos();
+    $('repoList').querySelector('.repo-row:last-child .rn')?.focus();
+  };
+
+  $('setTest').onclick = testModel;
+  $('setGrant').onclick = grantModelAccess;
+  refreshPermState(c.aiBase);
+
+  v.querySelectorAll('.tmpl-load').forEach(btn => {
+    btn.onclick = async () => {
+      const c2 = await cfg();
+      const ta = v.querySelector(`textarea[data-key="prompt${cap(btn.dataset.tmpl)}"]`);
+      ta.value = builtinTemplate(btn.dataset.tmpl, c2);
+      chrome.storage.local.set({ [ta.dataset.key]: ta.value });
+    };
+  });
+  v.querySelectorAll('.tmpl-clear').forEach(btn => {
+    btn.onclick = () => {
+      const ta = v.querySelector(`textarea[data-key="${btn.dataset.key}"]`);
+      ta.value = '';
+      chrome.storage.local.set({ [btn.dataset.key]: '' });
+    };
+  });
+}
