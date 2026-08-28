@@ -730,6 +730,8 @@ function openSettings() {
   $('openChat').hidden = true;
   $('settingsView').hidden = false;
   $('settings').textContent = '← Done';
+  $('cfgExport').hidden = false;
+  $('cfgImport').hidden = false;
   $('num').textContent = 'Settings';
   $('meta').textContent = '';
   $('sum').textContent = '';
@@ -743,6 +745,9 @@ async function closeSettings() {
   $('settingsView').innerHTML = '';
   $('out').hidden = false;
   $('settings').textContent = 'Settings';
+  $('cfgExport').hidden = true;
+  $('cfgImport').hidden = true;
+  $('foot').style.color = '';
   lastKey = '';                          // force a fresh redraw
   setView(await currentView());
 }
@@ -750,6 +755,81 @@ async function closeSettings() {
 $('settings').onclick = e => {
   e.preventDefault();
   settingsOpen ? closeSettings() : openSettings();
+};
+
+/* --- export / import the whole config as a JSON file --- */
+
+const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => k !== 'clientId');
+
+// brief coloured note in the footer's left slot
+function footMsg(kind, text) {
+  const f = $('foot');
+  f.textContent = (kind === 'ok' ? '✓ ' : kind === 'bad' ? '✕ ' : '') + text;
+  f.style.color = kind === 'ok' ? 'var(--ok)' : kind === 'bad' ? 'var(--bad)' : '';
+  clearTimeout(footMsg._t);
+  footMsg._t = setTimeout(() => { f.textContent = ''; f.style.color = ''; }, 4000);
+}
+
+async function exportConfig() {
+  const stored = await chrome.storage.local.get(CONFIG_KEYS);
+  const settings = {};
+  for (const k of CONFIG_KEYS) settings[k] = (k in stored) ? stored[k] : DEFAULTS[k];
+
+  if (((settings.aiKey || '') + (settings.ghToken || '')).trim() &&
+      !confirm('Include your model API key and GitHub token in the file?\n\n' +
+               'OK — include them (keep the file private)\n' +
+               'Cancel — export everything else')) {
+    settings.aiKey = '';
+    settings.ghToken = '';
+  }
+
+  const blob = new Blob([JSON.stringify(
+    { _type: 'cw-assist-config', _version: 1, exported: new Date().toISOString(), settings },
+    null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `cw-assist-config-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function importConfig(file) {
+  let doc;
+  try { doc = JSON.parse(await file.text()); }
+  catch { footMsg('bad', 'not valid JSON'); return; }
+
+  const src = (doc && typeof doc.settings === 'object' && doc.settings) ||
+              (doc && typeof doc === 'object' && doc) || null;
+  if (!src) { footMsg('bad', 'no settings found in file'); return; }
+
+  const patch = {};
+  for (const k of CONFIG_KEYS) {
+    if (!(k in src)) continue;
+    if (k === 'ghRepos') {
+      if (Array.isArray(src[k])) {
+        patch[k] = src[k].filter(r => r && typeof r === 'object')
+          .map(r => ({ name: String(r.name || ''), repo: String(r.repo || '') }));
+      }
+    } else {
+      patch[k] = String(src[k] ?? '');
+    }
+  }
+  if (!Object.keys(patch).length) { footMsg('bad', 'nothing recognised in file'); return; }
+
+  await chrome.storage.local.set(patch);
+  await renderSettings();
+  footMsg('ok', `imported ${Object.keys(patch).length} setting${Object.keys(patch).length === 1 ? '' : 's'}`);
+}
+
+$('cfgExport').onclick = e => { e.preventDefault(); exportConfig(); };
+$('cfgImport').onclick = e => { e.preventDefault(); $('cfgFile').click(); };
+$('cfgFile').onchange = e => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';                    // allow re-picking the same file later
+  if (file) importConfig(file);
 };
 
 /* --- repos sub-list --- */
