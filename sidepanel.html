@@ -10,7 +10,7 @@
     --field:#c1cbd8;                 /* input borders — darker than --line */
     /* ConnectWise's palette as the baseline: navy + mid blue */
     --accent:#0f6cbd; --accent-dark:#0a3560; --accent-bg:#e6f1fb;
-    --bad:#b3261e; --ok:#2f6b45;
+    --bad:#b3261e; --ok:#1f7a44; --warn:#a4610f;
   }
   *{ box-sizing:border-box; }
   /* .board-toolbar sets display:flex, which beats the UA stylesheet's [hidden] rule */
@@ -146,7 +146,10 @@
             color:var(--accent); cursor:pointer; white-space:nowrap; }
   .set-btn:hover:not(:disabled){ background:var(--accent); color:#fff; }
   .set-btn:disabled{ opacity:.45; cursor:default; }
-  .set-state{ font-size:13px; color:var(--mute); }
+  .set-state{ font-size:13px; color:var(--mute); font-weight:500; }
+  .set-state.ok{ color:var(--ok); font-weight:700; }
+  .set-state.bad{ color:var(--bad); font-weight:700; }
+  .set-state.warn{ color:var(--warn); font-weight:700; }
   .repo-row{ display:flex; gap:7px; margin-bottom:7px; }
   .repo-row .rn{ flex:0 0 38%; }
   .repo-row .ru{ flex:1; min-width:0; }

@@ -779,48 +779,61 @@ function drawSettingRepos() {
 
 /* --- model connection test + host permission --- */
 
+// paints a .set-state span: kind is 'ok' | 'bad' | 'warn' | '' (neutral)
+function stateMsg(el, kind, text) {
+  if (!el) return;
+  el.className = 'set-state' + (kind ? ' ' + kind : '');
+  const mark = kind === 'ok' ? '✓ ' : kind === 'bad' ? '✕ '
+             : kind === 'warn' ? '⚠ ' : '';
+  el.textContent = text ? mark + text : '';
+}
+
 const originPattern = base => { try { return new URL(base).origin + '/*'; } catch { return ''; } };
 
 async function refreshPermState(base) {
   const pat = originPattern(base);
   const btn = $('setGrant'), st = $('setGrantState');
   if (!btn) return;
-  if (!pat) { st.textContent = ''; btn.hidden = true; return; }
+  if (!pat) { stateMsg(st, '', ''); btn.hidden = true; return; }
   let has = false;
   try { has = await chrome.permissions.contains({ origins: [pat] }); } catch {}
   btn.hidden = has;
-  st.textContent = has ? `access granted for ${pat}` : `${pat} — not granted yet`;
+  has ? stateMsg(st, 'ok', `access granted for ${pat}`)
+      : stateMsg(st, 'warn', `${pat} — not granted yet`);
 }
 
 async function grantModelAccess() {
   const { aiBase } = await cfg();
   const pat = originPattern(aiBase);
-  if (!pat) { $('setGrantState').textContent = 'set a valid server URL first'; return; }
+  if (!pat) { stateMsg($('setGrantState'), 'warn', 'set a valid server URL first'); return; }
   try {
     const ok = await chrome.permissions.request({ origins: [pat] });
     await refreshPermState(aiBase);
-    if (!ok) $('setGrantState').textContent = 'denied';
+    if (!ok) stateMsg($('setGrantState'), 'bad', 'denied');
   } catch (e) {
-    $('setGrantState').textContent = String(e.message || e);
+    stateMsg($('setGrantState'), 'bad', String(e.message || e));
   }
 }
 
 async function testModel() {
   const st = $('setTestState');
-  st.textContent = 'testing…';
+  stateMsg(st, '', 'testing…');
   const c = await cfg();
-  if (!c.aiBase) { st.textContent = 'set a server URL first'; return; }
+  if (!c.aiBase) { stateMsg(st, 'warn', 'set a server URL first'); return; }
   try {
     const r = await fetch(`${c.aiBase.replace(/\/+$/, '')}/models`,
       { headers: c.aiKey ? { Authorization: `Bearer ${c.aiKey}` } : {} });
-    if (!r.ok) { st.textContent = `HTTP ${r.status}`; return; }
+    if (!r.ok) { stateMsg(st, 'bad', `HTTP ${r.status}`); return; }
     const j = await r.json();
     const names = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
-    st.textContent = c.aiModel && names.includes(c.aiModel)
-      ? `reachable · ${c.aiModel} found`
-      : `reachable · ${names.length} model(s), "${c.aiModel || '(none set)'}" not listed`;
+    if (c.aiModel && names.includes(c.aiModel)) {
+      stateMsg(st, 'ok', `reachable · ${c.aiModel} found`);
+    } else {
+      stateMsg(st, 'warn',
+        `reachable · ${names.length} model(s), "${c.aiModel || '(none set)'}" not listed`);
+    }
   } catch {
-    st.textContent = 'unreachable — grant access / accept the cert first';
+    stateMsg(st, 'bad', 'unreachable — grant access / accept the cert first');
   }
 }
 
@@ -967,9 +980,9 @@ async function renderSettings() {
     });
   });
 
-  $('setCwState').textContent = c.clientId
-    ? 'ConnectWise access key stored.'
-    : 'No access key yet — open or reload a ConnectWise tab once.';
+  c.clientId
+    ? stateMsg($('setCwState'), 'ok', 'ConnectWise access key stored.')
+    : stateMsg($('setCwState'), 'bad', 'No access key yet — open or reload a ConnectWise tab once.');
 
   setRepos = (Array.isArray(c.ghRepos) ? c.ghRepos : []).map(r => ({ name: r.name || '', repo: r.repo || '' }));
   drawSettingRepos();
