@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root{ --ink:#101720; --mute:#66727f; --faint:#98a2ae; --line:#e3e8ee;
+         --ok:#2f6b45; --bad:#b3261e; }
+  body{ width:300px; margin:0; padding:14px;
+        font:13px/1.5 ui-sans-serif,-apple-system,"Segoe UI",sans-serif; color:var(--ink); }
+  h1{ font-size:13px; font-weight:600; margin:0 0 4px; }
+  .lede{ color:var(--faint); font-size:12px; margin:0 0 12px; }
+  .row{ display:flex; align-items:center; gap:8px; margin-bottom:9px; }
+  .row label{ flex:1; color:var(--mute); }
+  input{ font:inherit; width:158px; padding:4px 7px; border:1px solid var(--line);
+         border-radius:5px; background:#fff; color:inherit; }
+  button{ font:inherit; padding:6px 12px; border-radius:6px; border:1px solid var(--line);
+          background:#fff; cursor:pointer; }
+  button:hover{ border-color:var(--ok); color:var(--ok); }
+  .muted{ font-size:12px; color:var(--faint); }
+  hr{ border:0; border-top:1px solid var(--line); margin:12px 0; }
+  .note{ font-size:11.5px; color:var(--faint); line-height:1.5; }
+
+  .subhead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+  .subhead span{ font-weight:600; }
+  .iconbtn{ padding:2px 9px; line-height:1.3; font-size:14px; }
+  .repo-row{ display:flex; gap:6px; margin-bottom:6px; }
+  .repo-row input{ width:auto; min-width:0; }
+  .repo-row .repo-name{ flex:0 0 88px; }
+  .repo-row .repo-url{ flex:1; }
+  .repo-row .repo-del{ flex:none; padding:4px 9px; color:var(--faint); }
+  .repo-row .repo-del:hover{ border-color:var(--bad); color:var(--bad); }
+</style>
+</head>
+<body>
+  <h1>ConnectWise support assist</h1>
+  <p class="lede">Buttons appear on any ticket page.</p>
+
+  <div class="row"><label for="aiBase">Server</label><input id="aiBase" type="text"></div>
+  <div class="row"><label for="aiModel">Model</label><input id="aiModel" type="text"></div>
+  <div class="row"><label for="aiKey">API key</label><input id="aiKey" type="password" placeholder="sk-…"></div>
+  <div class="row"><label for="aiTools">Tool ids</label><input id="aiTools" type="text" placeholder="connectwise"></div>
+
+  <div class="row">
+    <button id="test">Test connection</button>
+    <span class="muted" id="state"></span>
+  </div>
+
+  <hr>
+  <div class="subhead">
+    <span>GitHub repos</span>
+    <button id="repoAdd" class="iconbtn" title="add a repo">+</button>
+  </div>
+  <div id="repoList"></div>
+  <div class="row"><label for="ghToken">GitHub token</label><input id="ghToken" type="password" placeholder="ghp_…"></div>
+  <p class="note">The GitHub tab lets you draft an issue from a ticket and open it against
+     one of these repos. Name is free text; repo is <b>owner/name</b> or a github.com URL.
+     The token is a personal access token with issue-write permission on the repos you list.</p>
+
+  <hr>
+  <p class="note" id="cwstate"></p>
+  <p class="note">Tool ids activate tools in chats opened from the side panel — a chat
+     opened from a URL does not inherit the ones you have switched on in Open WebUI.
+     Find them in Open WebUI under Workspace &rarr; Tools; comma-separate several.</p>
+  <p class="note">Self-signed certificate? Open the server URL in a tab once and accept it,
+     otherwise Chrome blocks the request before it leaves.</p>
+
+  <script src="cwlib.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>
