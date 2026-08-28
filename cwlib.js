@@ -57,9 +57,22 @@ async function cwUrls() {
 const vendorProse = c => (c.vendorName || '').trim() || 'our team';
 const vendorTag   = c => (c.vendorName || '').trim() || 'Us';
 
-// fills {{placeholders}} in a user-supplied override string
+// fills {{placeholders}} in a user-supplied override string; an unknown
+// placeholder collapses to '' rather than being left in the text
 const fillTemplate = (tpl, vars) =>
   String(tpl).replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] ?? '').toString());
+
+// the full placeholder set every prompt override understands. Per-run values
+// (ticket / company / repo) are passed in `extra`; the rest come from settings.
+function promptVars(c, extra = {}) {
+  return {
+    vendor    : vendorProse(c),
+    domain    : (c.domainFocus || '').trim(),
+    extraRules: (c.boardExtraRules || '').trim(),
+    ticket: '', company: '', repo: '',
+    ...extra
+  };
+}
 
 /* ---- ConnectWise -------------------------------------------------- */
 
@@ -115,7 +128,7 @@ function buildSystem(c) {
   const v = vendorProse(c);
   const domain = (c.domainFocus || '').trim();
   if ((c.promptSystem || '').trim()) {
-    return fillTemplate(c.promptSystem, { vendor: v, domain });
+    return fillTemplate(c.promptSystem, promptVars(c));
   }
   return `You are helping ${v === 'our team' ? 'a support consultant' : `a support consultant at ${v}`} work a ConnectWise ticket.
 
@@ -133,8 +146,7 @@ function, and never emit tool-call syntax. Just answer from what is here.`;
 }
 
 function buildSummaryPrompt(c, t) {
-  const vars = { ticket: t.ticket, company: t.company || 'unknown company',
-                 vendor: vendorProse(c), domain: (c.domainFocus || '').trim() };
+  const vars = promptVars(c, { ticket: t.ticket, company: t.company || 'unknown company' });
   if ((c.promptSummary || '').trim()) return fillTemplate(c.promptSummary, vars);
   return `Summarise ticket ${vars.ticket} (${vars.company}).
 
@@ -154,8 +166,7 @@ Nothing before the first heading and nothing after the last.`;
 }
 
 function buildStandingPrompt(c, t) {
-  const vars = { ticket: t.ticket, company: t.company || 'unknown company',
-                 vendor: vendorProse(c), domain: (c.domainFocus || '').trim() };
+  const vars = promptVars(c, { ticket: t.ticket, company: t.company || 'unknown company' });
   if ((c.promptStanding || '').trim()) return fillTemplate(c.promptStanding, vars);
   return `For ticket ${vars.ticket}, work out what is actually outstanding.
 
@@ -184,7 +195,7 @@ function buildBoardPrompt(c) {
   const extra = (c.boardExtraRules || '').trim();
   const domain = (c.domainFocus || '').trim();
   if ((c.promptBoard || '').trim()) {
-    return fillTemplate(c.promptBoard, { vendor: vendorProse(c), domain, extraRules: extra });
+    return fillTemplate(c.promptBoard, promptVars(c));
   }
   return `Produce a triage table for these open tickets.
 
@@ -223,8 +234,7 @@ After the table, one line naming the one or two to do first, and why.`;
 function buildIssuePrompt(c, t, repoName) {
   const repo = (repoName || '').trim() || 'this project';
   const domain = (c.domainFocus || '').trim();
-  const vars = { ticket: t.ticket, company: t.company || 'unknown company',
-                 vendor: vendorProse(c), domain, repo };
+  const vars = promptVars(c, { ticket: t.ticket, company: t.company || 'unknown company', repo });
   if ((c.promptIssue || '').trim()) return fillTemplate(c.promptIssue, vars);
   return `From ticket ${vars.ticket} (${vars.company}), draft a GitHub issue for ${repo}.
 
@@ -477,7 +487,7 @@ async function handoff(ticketId) {
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
 
   const prompt = (c.promptHandoff || '').trim()
-    ? fillTemplate(c.promptHandoff, { ticket: ticketId })
+    ? fillTemplate(c.promptHandoff, promptVars(c, { ticket: ticketId }))
     : `fetch cw ticket ${ticketId}.
 then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
 - next diagnostic step

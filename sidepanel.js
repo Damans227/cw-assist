@@ -825,19 +825,22 @@ async function testModel() {
 }
 
 /* --- built-in prompt defaults, for the "Load built-in" buttons ---
-   Per-run bits (ticket / company / repo) come back as {{placeholders}} so an
-   edited copy still fills in per ticket; vendor / domain / extra-rules are
-   resolved from the current settings.                                     */
-
-const PROMPT_VARS = { ticket: '{{ticket}}', company: '{{company}}' };
+   Everything the override path can fill comes back as a {{placeholder}} —
+   ticket / company / repo (per run) and vendor / domain / extraRules
+   (settings) — so a loaded-and-edited copy stays fully dynamic and nothing
+   is frozen in.                                                          */
 
 function builtinTemplate(name, c) {
+  const cc = { ...c,
+    vendorName: '{{vendor}}', domainFocus: '{{domain}}', boardExtraRules: '{{extraRules}}',
+    promptSystem: '', promptSummary: '', promptStanding: '', promptBoard: '', promptIssue: '' };
+  const V = { ticket: '{{ticket}}', company: '{{company}}' };
   switch (name) {
-    case 'system'  : return buildSystem({ ...c, promptSystem: '' });
-    case 'summary' : return buildSummaryPrompt({ ...c, promptSummary: '' }, PROMPT_VARS);
-    case 'standing': return buildStandingPrompt({ ...c, promptStanding: '' }, PROMPT_VARS);
-    case 'board'   : return buildBoardPrompt({ ...c, promptBoard: '' });
-    case 'issue'   : return buildIssuePrompt({ ...c, promptIssue: '' }, PROMPT_VARS, '{{repo}}');
+    case 'system'  : return buildSystem(cc);
+    case 'summary' : return buildSummaryPrompt(cc, V);
+    case 'standing': return buildStandingPrompt(cc, V);
+    case 'board'   : return buildBoardPrompt(cc);
+    case 'issue'   : return buildIssuePrompt(cc, V, '{{repo}}');
     case 'handoff' : return `fetch cw ticket {{ticket}}.
 then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
 - next diagnostic step
