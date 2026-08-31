@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#0f766e"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#0f766e" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- background -->
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+  <rect x="4.5" y="4.5" width="119" height="119" rx="25.5" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
+
+  <!-- chat / ticket bubble -->
+  <path d="M30 40
+           a12 12 0 0 1 12 -12
+           h34
+           a12 12 0 0 1 12 12
+           v26
+           a12 12 0 0 1 -12 12
+           h-20
+           l-14 13
+           v-13
+           h-0
+           a12 12 0 0 1 -12 -12
+           z"
+        fill="#ffffff" filter="url(#soft)"/>
+
+  <!-- three dots inside bubble = ticket thread -->
+  <circle cx="45" cy="52" r="4.2" fill="#0f766e"/>
+  <circle cx="61" cy="52" r="4.2" fill="#0f766e"/>
+  <circle cx="77" cy="52" r="4.2" fill="#0f766e"/>
+
+  <!-- AI spark badge -->
+  <g transform="translate(88,80)">
+    <circle r="24" fill="#f59e0b"/>
+    <path d="M0 -12
+             L3.6 -3.6
+             L12 0
+             L3.6 3.6
+             L0 12
+             L-3.6 3.6
+             L-12 0
+             L-3.6 -3.6
+             Z"
+          fill="#ffffff"/>
+  </g>
+</svg>
