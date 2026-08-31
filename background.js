@@ -71,9 +71,16 @@ chrome.tabs.onRemoved.addListener(async tabId => {
    load, than a brand new one). Once the tab finishes loading, this gives it
    a few seconds to send on its own, then — only if nothing with our prompt
    ever showed up in the transcript — types it into the composer and hits
-   send itself, as a fallback. Needs host permission for that page, which
-   "Grant access" in settings already covers (same permission the model
-   calls themselves need). */
+   send itself, as a fallback.
+
+   When the "Attach new files" checkbox pulled in ticket attachments,
+   sidepanel.js skips ?q= entirely (typing into an existing draft is one
+   thing; racing a file upload too is asking for trouble) and this drives
+   the whole sequence itself instead: drop the files onto the composer,
+   wait for them to show as attached, then type the prompt and send.
+
+   Needs host permission for that page, which "Grant access" in settings
+   already covers (same permission the model calls themselves need). */
 
 const PENDING_SEND_MAX_AGE_MS = 5 * 60 * 1000;
 
@@ -86,11 +93,21 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (Date.now() - pendingSend.ts > PENDING_SEND_MAX_AGE_MS) return;
 
   try {
-    await chrome.scripting.executeScript({
+    const [{ result } = {}] = await chrome.scripting.executeScript({
       target: { tabId },
       func: ensurePromptSent,
-      args: [pendingSend.prompt]
+      args: [pendingSend.prompt, pendingSend.files || []]
     });
+
+    // Only commit the "already sent" watermark once attaching+sending
+    // looks like it actually went out — a failed attempt should leave
+    // those attachments still looking "new" next click, not lost.
+    if (pendingSend.files?.length && result?.ok && pendingSend.key && pendingSend.newestISO) {
+      const { handoffAttachments = {} } = await chrome.storage.local.get('handoffAttachments');
+      await chrome.storage.local.set({
+        handoffAttachments: { ...handoffAttachments, [pendingSend.key]: pendingSend.newestISO }
+      });
+    }
   } catch (e) {
     console.warn('cw-assist: could not arm send-fallback for tab', tabId, e);
   }
@@ -99,10 +116,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 // Runs inside the Open WebUI page — kept as a plain, self-contained function
 // since chrome.scripting.executeScript serializes it and runs it there, not
 // here. DOM selectors are best-effort guesses at Open WebUI's chat composer
-// and may need updating if its UI changes.
-function ensurePromptSent(promptText) {
+// and file-attach control, and may need updating if its UI changes.
+// filesB64: [{ name, b64 }] — empty for a plain text-only send.
+function ensurePromptSent(promptText, filesB64) {
+  filesB64 = filesB64 || [];
   const marker = promptText.slice(0, 30);
-  const deadline = Date.now() + 6000;
 
   const alreadySent = () => (document.body.innerText || '').includes(marker);
 
@@ -124,9 +142,9 @@ function ensurePromptSent(promptText) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  function forceSend() {
+  function fillAndSend() {
     const composer = findComposer();
-    if (!composer) return;
+    if (!composer) return false;
     composer.focus();
     if (composer.tagName === 'TEXTAREA') {
       setNativeValue(composer, promptText);
@@ -141,11 +159,67 @@ function ensurePromptSent(promptText) {
         key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
       }));
     }, 150);
+    return true;
   }
 
-  (function tick() {
-    if (alreadySent()) return;          // Open WebUI's own auto-send worked
-    if (Date.now() > deadline) { forceSend(); return; }
-    setTimeout(tick, 400);
-  })();
+  function b64ToFile(name, b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const ext = (name.match(/\.([a-z0-9]+)$/i) || ['', ''])[1].toLowerCase();
+    const mime = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+      pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain',
+      json: 'application/json', csv: 'text/csv', zip: 'application/zip'
+    }[ext] || 'application/octet-stream';
+    return new File([bytes], name, { type: mime });
+  }
+
+  // Prefers a real file input (what a click on the paperclip button feeds);
+  // falls back to simulating a drop onto the composer if none is found.
+  function attachFiles() {
+    const dt = new DataTransfer();
+    filesB64.forEach(f => dt.items.add(b64ToFile(f.name, f.b64)));
+
+    const input = document.querySelector('input[type="file"]');
+    if (input) {
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    const composer = findComposer();
+    if (!composer) return false;
+    ['dragenter', 'dragover', 'drop'].forEach(type => {
+      composer.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+    });
+    return true;
+  }
+
+  const filesLookAttached = () => {
+    const body = document.body.innerText || '';
+    return filesB64.every(f => body.includes(f.name));
+  };
+
+  return new Promise(resolve => {
+    if (!filesB64.length) {
+      // Text-only: give Open WebUI's own ?q= auto-send a chance first.
+      const deadline = Date.now() + 6000;
+      (function tick() {
+        if (alreadySent()) return resolve({ ok: true });
+        if (Date.now() > deadline) return resolve({ ok: fillAndSend() });
+        setTimeout(tick, 400);
+      })();
+      return;
+    }
+
+    // Attachments: no ?q= was set, so this owns the whole sequence —
+    // attach, wait for them to register, then type the prompt and send.
+    if (!attachFiles()) return resolve({ ok: false, reason: 'composer not found' });
+    const deadline = Date.now() + 8000;
+    (function tick() {
+      if (filesLookAttached() || Date.now() > deadline) return resolve({ ok: fillAndSend() });
+      setTimeout(tick, 400);
+    })();
+  });
 }

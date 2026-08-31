@@ -46,6 +46,10 @@
         border-radius:7px; background:var(--accent); color:#fff; cursor:pointer; }
   .run:hover:not(:disabled){ background:var(--accent-dark); border-color:var(--accent-dark); }
   .run:disabled{ opacity:.4; cursor:default; }
+  .openChatWrap{ display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+  .attach-toggle{ display:flex; align-items:center; gap:5px; font-size:12px;
+                  color:var(--mute); cursor:pointer; user-select:none; white-space:nowrap; }
+  .attach-toggle input{ margin:0; }
   .ghost{ margin-left:auto; flex:none; font:inherit; font-size:14.5px; padding:6px 14px;
           white-space:nowrap; border:1px solid var(--line); border-radius:7px;
           background:#fff; color:var(--ink); cursor:pointer; }
@@ -183,7 +187,12 @@
     <p class="sum" id="sum"></p>
   </div>
   <button class="run" id="boardRun" hidden title="read every open ticket and ask the model again">Run summary</button>
-  <button class="run" id="openChat" hidden title="open this ticket in Open WebUI and ask for next steps">Open in chat &rarr;</button>
+  <div class="openChatWrap" id="openChatWrap" hidden>
+    <label class="attach-toggle" title="fetch any attachments new since the last time this ticket was sent, and attach them">
+      <input type="checkbox" id="attachToggle" checked> Attach new files
+    </label>
+    <button class="run" id="openChat" title="open this ticket in Open WebUI and ask for next steps">Open in chat &rarr;</button>
+  </div>
 </header>
 
 <div class="board-toolbar" id="ticketLaneBtns" hidden>
