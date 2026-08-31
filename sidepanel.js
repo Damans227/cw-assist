@@ -716,7 +716,7 @@ $('openChat').onclick = async () => {
   const b = $('openChat');
   b.disabled = true;
   try {
-    const { url, isNew, root } = await handoff(ticket);
+    const { url, isNew, root, prompt } = await handoff(ticket);
     const tab = await chrome.tabs.create({ url });
     if (isNew) {
       // background.js watches this tab for Open WebUI settling on /c/<id>
@@ -726,6 +726,12 @@ $('openChat').onclick = async () => {
         pendingHandoff: { tabId: tab.id, ticket, cwOrigin, root, ts: Date.now() }
       });
     }
+    // Open WebUI's own ?q= auto-send is racy against its chat-history load,
+    // especially on an existing chat — background.js checks after the tab
+    // loads and fills the prompt in itself if it never went out.
+    await chrome.storage.local.set({
+      pendingSend: { tabId: tab.id, prompt, ts: Date.now() }
+    });
     window.close();
   } catch (e) {
     b.disabled = false;

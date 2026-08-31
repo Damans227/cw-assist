@@ -522,5 +522,5 @@ then work out what's going on — pull in similar past tickets if any help, plus
     : '';
   const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
   const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
-  return { url, isNew: !chatId, root };
+  return { url, isNew: !chatId, root, prompt };
 }

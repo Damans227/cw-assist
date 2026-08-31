@@ -50,6 +50,10 @@ GitHub API you configured — there's no backend of ours in between.
 - Reads the ConnectWise tab you have open, to grab the ticket.
 - Talks to the AI endpoint and GitHub repo you configure — both blank by
   default, both opt-in.
+- "Open in chat" can type into and submit the message box on your AI
+  endpoint's page — only on the tab it just opened, only to send the prompt
+  it built, and only as a fallback for when the endpoint's own auto-send
+  doesn't fire (see below).
 - Everything is stored locally in the browser (`chrome.storage.local`).
 
 ## Export / import settings
@@ -65,6 +69,10 @@ before being included.
   English button/label text on the page).
 - Self-hosted ConnectWise on a domain other than `*.myconnectwise.net` needs
   a manual permission grant (Settings → Grant access).
+- The "Open in chat" send-fallback guesses at your AI endpoint's chat-box
+  markup, tuned against Open WebUI. If it ever redesigns that page, the
+  fallback may stop finding the box — the initial open/prompt-fill still
+  works either way.
 
 ## Contributing
 

@@ -59,4 +59,93 @@ chrome.tabs.onRemoved.addListener(async tabId => {
   if (pendingHandoff && pendingHandoff.tabId === tabId) {
     await chrome.storage.local.remove('pendingHandoff');
   }
+  const { pendingSend } = await chrome.storage.local.get('pendingSend');
+  if (pendingSend && pendingSend.tabId === tabId) {
+    await chrome.storage.local.remove('pendingSend');
+  }
 });
+
+/* Open WebUI's own ?q= auto-send races its chat-history load — it usually
+   works, but sometimes the history re-render clobbers the auto-filled draft
+   before it goes out (worse odds on an existing chat, which has history to
+   load, than a brand new one). Once the tab finishes loading, this gives it
+   a few seconds to send on its own, then — only if nothing with our prompt
+   ever showed up in the transcript — types it into the composer and hits
+   send itself, as a fallback. Needs host permission for that page, which
+   "Grant access" in settings already covers (same permission the model
+   calls themselves need). */
+
+const PENDING_SEND_MAX_AGE_MS = 5 * 60 * 1000;
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+  if (changeInfo.status !== 'complete') return;
+
+  const { pendingSend } = await chrome.storage.local.get('pendingSend');
+  if (!pendingSend || pendingSend.tabId !== tabId) return;
+  await chrome.storage.local.remove('pendingSend');   // one attempt only
+  if (Date.now() - pendingSend.ts > PENDING_SEND_MAX_AGE_MS) return;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: ensurePromptSent,
+      args: [pendingSend.prompt]
+    });
+  } catch (e) {
+    console.warn('cw-assist: could not arm send-fallback for tab', tabId, e);
+  }
+});
+
+// Runs inside the Open WebUI page — kept as a plain, self-contained function
+// since chrome.scripting.executeScript serializes it and runs it there, not
+// here. DOM selectors are best-effort guesses at Open WebUI's chat composer
+// and may need updating if its UI changes.
+function ensurePromptSent(promptText) {
+  const marker = promptText.slice(0, 30);
+  const deadline = Date.now() + 6000;
+
+  const alreadySent = () => (document.body.innerText || '').includes(marker);
+
+  const findComposer = () =>
+    document.querySelector('#chat-input') ||
+    document.querySelector('textarea[placeholder*="Message" i]') ||
+    document.querySelector('[contenteditable="true"]');
+
+  const findSendBtn = composer =>
+    document.querySelector('#send-message-button') ||
+    document.querySelector('button[aria-label*="Send message" i]') ||
+    (composer && composer.closest('form') &&
+      composer.closest('form').querySelector('button[type="submit"]'));
+
+  function setNativeValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function forceSend() {
+    const composer = findComposer();
+    if (!composer) return;
+    composer.focus();
+    if (composer.tagName === 'TEXTAREA') {
+      setNativeValue(composer, promptText);
+    } else {
+      composer.textContent = promptText;
+      composer.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }
+    setTimeout(() => {
+      const btn = findSendBtn(composer);
+      if (btn && !btn.disabled) { btn.click(); return; }
+      composer.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+      }));
+    }, 150);
+  }
+
+  (function tick() {
+    if (alreadySent()) return;          // Open WebUI's own auto-send worked
+    if (Date.now() > deadline) { forceSend(); return; }
+    setTimeout(tick, 400);
+  })();
+}
