@@ -562,12 +562,14 @@ async function chat(aiKey, aiBase, aiModel, system, userContent) {
 // settle on `/c/<id>`, and remembers it against this ticket. Every click
 // after that opens `/c/<id>` directly with a short catch-up prompt instead.
 //
-// When `sendAttachments` is on (the panel's checkbox), attachments added to
-// the ticket since the last handoff ride along too. Since those have to be
-// dropped onto the page ourselves rather than trusted to Open WebUI's own
-// ?q= auto-send (see background.js), the URL skips q= whenever there are
-// files — background.js's injected script owns typing the prompt and
-// sending once they're attached, rather than racing its own auto-send.
+// ?q= always rides along — it's Open WebUI's own auto-fill-and-send, and
+// it's the one part of this whole handoff that's actually proven reliable.
+// Anything that meant *not* trusting it (driving a file attach ourselves via
+// DOM injection) turned out not to work at all against a real Open WebUI
+// build — no message, no attachment, nothing ever reached the server. So
+// when `sendAttachments` turns up new ticket attachments, they're saved
+// straight to disk instead and just named in the prompt — a real, always-
+// works drag-in instead of a fragile automatic one.
 async function handoff(ticketId, { sendAttachments = false } = {}) {
   const c = await cfg();
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
@@ -591,12 +593,11 @@ then work out what's going on — pull in similar past tickets if any help, plus
     const since = (c.handoffAttachments || {})[key] || null;
     ({ files, skipped, newestISO } = await ticketAttachments(ticketId, since));
     if (files.length) {
-      prompt += chatId
-        ? `\n\nNew attachment(s) since last time: ${files.map(f => f.name).join(', ')} — take a look.`
-        : `\n\nAttached: ${files.map(f => f.name).join(', ')}.`;
+      prompt += `\n\nNew attachment(s) since last time, saved to your Downloads folder ` +
+        `(cw-assist/${ticketId}/): ${files.map(f => f.name).join(', ')} — drag them in here.`;
     }
     if (skipped.length) {
-      prompt += `\n\n(Not attached — ${skipped.map(s => `${s.name} (${s.reason})`).join('; ')}.)`;
+      prompt += `\n\n(Not saved — ${skipped.map(s => `${s.name} (${s.reason})`).join('; ')}.)`;
     }
   }
 
@@ -606,7 +607,6 @@ then work out what's going on — pull in similar past tickets if any help, plus
       `&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
     : '';
   const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
-  const q = files.length ? '' : `&q=${encodeURIComponent(prompt)}`;
-  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}${q}`;
+  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
   return { url, isNew: !chatId, root, prompt, files, key, newestISO };
 }
