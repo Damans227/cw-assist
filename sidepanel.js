@@ -711,17 +711,13 @@ async function refreshOpenChatLabel() {
     : 'open this ticket in Open WebUI and ask for next steps';
 }
 
-// chrome.downloads wants a data: URL, not raw bytes.
-function bytesToDataUrl(bytes, name) {
-  const ext = (name.match(/\.([a-z0-9]+)$/i) || ['', ''])[1].toLowerCase();
-  const mime = {
-    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-    pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain',
-    json: 'application/json', csv: 'text/csv', zip: 'application/zip'
-  }[ext] || 'application/octet-stream';
+// chrome.storage.local JSON-serializes values, which mangles a raw
+// Uint8Array — go through base64 (bounded ~33% overhead) instead. The
+// injected script on the other end reverses this with atob().
+function bytesToBase64(bytes) {
   let bin = '';
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return `data:${mime};base64,${btoa(bin)}`;
+  return btoa(bin);
 }
 
 $('openChat').onclick = async () => {
@@ -733,24 +729,6 @@ $('openChat').onclick = async () => {
   if (sendAttachments) b.textContent = 'Fetching attachments…';
   try {
     const { url, isNew, root, prompt, files, key, newestISO } = await handoff(ticket, { sendAttachments });
-
-    // Real, guaranteed-to-work drag-in beats a fragile automatic one: new
-    // attachments land in Downloads, named in the prompt, so it's a single
-    // manual drag rather than a from-scratch hunt.
-    for (const f of files) {
-      await chrome.downloads.download({
-        url: bytesToDataUrl(f.bytes, f.name),
-        filename: `cw-assist/${ticket}/${f.name}`,
-        saveAs: false
-      });
-    }
-    if (files.length && key && newestISO) {
-      const { handoffAttachments = {} } = await chrome.storage.local.get('handoffAttachments');
-      await chrome.storage.local.set({
-        handoffAttachments: { ...handoffAttachments, [key]: newestISO }
-      });
-    }
-
     const tab = await chrome.tabs.create({ url });
     if (isNew) {
       // background.js watches this tab for Open WebUI settling on /c/<id>
@@ -762,9 +740,15 @@ $('openChat').onclick = async () => {
     }
     // Open WebUI's own ?q= auto-send is racy against its chat-history load,
     // especially on an existing chat — background.js checks after the tab
-    // loads and fills the prompt in itself if it never went out.
+    // loads and, when there's nothing to attach, fills the prompt in itself
+    // if it never went out. When there are files, ?q= was skipped entirely
+    // and background.js drives the whole attach-then-send itself instead.
     await chrome.storage.local.set({
-      pendingSend: { tabId: tab.id, prompt, ts: Date.now() }
+      pendingSend: {
+        tabId: tab.id, prompt, ts: Date.now(),
+        files: files.map(f => ({ name: f.name, b64: bytesToBase64(f.bytes) })),
+        key, newestISO
+      }
     });
     window.close();
   } catch (e) {

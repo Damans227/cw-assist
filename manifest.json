@@ -5,10 +5,10 @@
   "description": "Reads the open ConnectWise ticket and runs it past your own OpenAI-compatible model — summary, what's outstanding, and a drafted GitHub issue.",
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "sidePanel",
     "tabs",
-    "scripting",
-    "downloads"
+    "scripting"
   ],
   "host_permissions": [
     "https://*.myconnectwise.net/*",
