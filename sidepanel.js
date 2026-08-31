@@ -335,6 +335,7 @@ function setView(v) {
   $('foot').textContent = '';
 
   refreshGhIssueTab();         // tab label shows if this ticket already has a draft
+  if (onTicket) refreshOpenChatLabel();
 
   if (onBoard) {
     showBoardTab('latest');    // free — just redisplays the last saved run, if any
@@ -700,12 +701,31 @@ $('boardRun').onclick = async () => {
   }
 };
 
+async function refreshOpenChatLabel() {
+  const b = $('openChat');
+  const c = await cfg();
+  const known = !!(c.handoffChats || {})[handoffKey(c.cwOrigin, ticket)];
+  b.textContent = known ? 'Continue chat →' : 'Open in chat →';
+  b.title = known
+    ? 'open the existing chat for this ticket and ask for the latest'
+    : 'open this ticket in Open WebUI and ask for next steps';
+}
+
 $('openChat').onclick = async () => {
   if (!ticket) return;
   const b = $('openChat');
   b.disabled = true;
   try {
-    await chrome.tabs.create({ url: await handoff(ticket) });
+    const { url, isNew, root } = await handoff(ticket);
+    const tab = await chrome.tabs.create({ url });
+    if (isNew) {
+      // background.js watches this tab for Open WebUI settling on /c/<id>
+      // and files the chat id away so the next click reuses it.
+      const { cwOrigin } = await chrome.storage.local.get('cwOrigin');
+      await chrome.storage.local.set({
+        pendingHandoff: { tabId: tab.id, ticket, cwOrigin, root, ts: Date.now() }
+      });
+    }
     window.close();
   } catch (e) {
     b.disabled = false;
@@ -759,7 +779,9 @@ $('settings').onclick = e => {
 
 /* --- export / import the whole config as a JSON file --- */
 
-const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => k !== 'clientId');
+// handoffChats is runtime data (which Open WebUI chat belongs to which
+// ticket, on this machine) — never exported/imported as a setting.
+const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => k !== 'clientId' && k !== 'handoffChats');
 
 // brief coloured note in the footer's left slot
 function footMsg(kind, text) {
@@ -938,6 +960,7 @@ function builtinTemplate(name, c) {
 then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
 - next diagnostic step
 - next useful thing to check, run, or ask`;
+    case 'handoffFollowup': return `fetch cw ticket {{ticket}} for the latest updates from the customer and advise what the next steps should be.`;
   }
   return '';
 }
@@ -1047,7 +1070,8 @@ async function renderSettings() {
       ${promptField('standing', 'Outstanding lane')}
       ${promptField('board',    'Board triage')}
       ${promptField('issue',    'GitHub issue draft')}
-      ${promptField('handoff',  '“Open in chat” prompt')}
+      ${promptField('handoff',         '“Open in chat” prompt — new chat')}
+      ${promptField('handoffFollowup', '“Continue chat” prompt — chat already exists')}
     </details>`;
 
   // generic bind for every [data-key] field

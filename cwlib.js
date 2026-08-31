@@ -36,12 +36,22 @@ const DEFAULTS = {
   promptStanding: '',
   promptBoard   : '',
   promptIssue   : '',
-  promptHandoff : '',
+  promptHandoff        : '',   // first "Open in chat" for a ticket — full diagnosis
+  promptHandoffFollowup: '',   // later clicks, once a chat already exists — catch-up
 
   /* ---- GitHub issue lane ---- */
   ghRepos: [],                 // [{ name, repo }] — repo is "owner/name" or a URL
-  ghToken: ''
+  ghToken: '',
+
+  /* ---- "Open in chat" reuses the same Open WebUI chat per ticket instead of
+     spawning a new one every click. background.js fills this in once it
+     spots the chat id Open WebUI assigns after the first message. ---- */
+  handoffChats: {}             // { "<cwOrigin>|<ticketId>": "<chatId>" }
 };
+
+// Same key shape used by background.js when it records a newly-created chat —
+// keep the two in sync if this ever changes.
+const handoffKey = (cwOrigin, ticketId) => `${cwOrigin || ''}|${ticketId}`;
 
 const cfg = async () => ({ ...DEFAULTS, ...(await chrome.storage.local.get(DEFAULTS)) });
 
@@ -482,21 +492,35 @@ async function chat(aiKey, aiBase, aiModel, system, userContent) {
 // existing chat and fails from here. Set Tool ids in settings (Open WebUI:
 // Workspace -> Tools). Different Open WebUI versions read a different query
 // param, so pass both: `tools=` (comma list) and `tool_ids=` (JSON array).
+//
+// Reuses one Open WebUI chat per ticket rather than spawning a new one every
+// click: the first "Open in chat" opens `/` (new chat) with the full
+// diagnosis prompt; background.js watches that tab, notices Open WebUI
+// settle on `/c/<id>`, and remembers it against this ticket. Every click
+// after that opens `/c/<id>` directly with a short catch-up prompt instead.
 async function handoff(ticketId) {
   const c = await cfg();
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
+  const chatId = (c.handoffChats || {})[handoffKey(c.cwOrigin, ticketId)];
+  const vars = promptVars(c, { ticket: ticketId });
 
-  const prompt = (c.promptHandoff || '').trim()
-    ? fillTemplate(c.promptHandoff, promptVars(c, { ticket: ticketId }))
-    : `fetch cw ticket ${ticketId}.
+  const prompt = chatId
+    ? ((c.promptHandoffFollowup || '').trim()
+        ? fillTemplate(c.promptHandoffFollowup, vars)
+        : `fetch cw ticket ${ticketId} for the latest updates from the customer and advise what the next steps should be.`)
+    : ((c.promptHandoff || '').trim()
+        ? fillTemplate(c.promptHandoff, vars)
+        : `fetch cw ticket ${ticketId}.
 then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
 - next diagnostic step
-- next useful thing to check, run, or ask`;
+- next useful thing to check, run, or ask`);
 
   const ids = (c.aiTools || '').split(',').map(s => s.trim()).filter(Boolean);
   const tools = ids.length
     ? `&tools=${encodeURIComponent(ids.join(','))}` +
       `&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
     : '';
-  return `${root}/?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
+  const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
+  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
+  return { url, isNew: !chatId, root };
 }
