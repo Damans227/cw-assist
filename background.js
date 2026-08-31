@@ -84,9 +84,16 @@ chrome.tabs.onRemoved.addListener(async tabId => {
 
 const PENDING_SEND_MAX_AGE_MS = 5 * 60 * 1000;
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
-  if (changeInfo.status !== 'complete') return;
-
+// sidepanel.js writes `pendingSend` to storage *after* chrome.tabs.create()
+// resolves — on a fast/local server the tab can already be at
+// changeInfo.status === 'complete' before that write lands, so the onUpdated
+// listener below fires too early, finds nothing yet, and (since 'complete'
+// only fires once per navigation) never gets a second chance. Reacting to
+// the storage write itself as a second trigger closes that gap: whichever
+// of "tab finished loading" / "pendingSend arrived" happens second is the
+// one that actually runs it. runPendingSend() re-reads and removes it
+// itself, so whichever fires first wins and the other is a no-op.
+async function runPendingSend(tabId) {
   const { pendingSend } = await chrome.storage.local.get('pendingSend');
   if (!pendingSend || pendingSend.tabId !== tabId) return;
   await chrome.storage.local.remove('pendingSend');   // one attempt only
@@ -111,6 +118,18 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   } catch (e) {
     console.warn('cw-assist: could not arm send-fallback for tab', tabId, e);
   }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'complete') runPendingSend(tabId);
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  const tabId = changes.pendingSend?.newValue?.tabId;
+  if (area !== 'local' || tabId == null) return;
+  chrome.tabs.get(tabId).then(tab => {
+    if (tab.status === 'complete') runPendingSend(tabId);
+  }).catch(() => {});   // tab already gone
 });
 
 // Runs inside the Open WebUI page — kept as a plain, self-contained function
