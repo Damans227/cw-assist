@@ -73,26 +73,6 @@ chrome.tabs.onRemoved.addListener(async tabId => {
    ever showed up in the transcript — types it into the composer and hits
    send itself, as a fallback.
 
-   When the "Save new files" checkbox pulled in ticket attachments,
-   sidepanel.js skips ?q= entirely (attaching a file and sending the message
-   have to land as one client-side sequence, in the same message, and racing
-   that against Open WebUI's own auto-send risks the text going out before
-   the files are actually on it) and this drives the whole sequence itself
-   instead: attach the files, confirm they're attached, then type the
-   prompt and send.
-
-   A first attempt at the attach path came up completely empty against a
-   real Open WebUI build — a HAR capture showed no message, no attachment,
-   nothing ever reached the server. Most likely two compounding causes: (1)
-   this build's composer is a rich-text editor whose internal state a plain
-   .textContent write doesn't reliably register with, and (2) we don't
-   actually know whether a plain file input existed in the DOM at that
-   point. This version tries harder on both counts — execCommand as a
-   second text-insertion method, and a broader hunt for the file input
-   including clicking an attach/upload-looking button first — and keeps
-   detailed console.log calls (visible on the Open WebUI tab itself, F12)
-   so a repeat failure points at the real cause instead of another guess.
-
    Needs host permission for that page, which "Grant access" in settings
    already covers (same permission the model calls themselves need). */
 
@@ -111,28 +91,14 @@ async function runPendingSend(tabId) {
   const { pendingSend } = await chrome.storage.local.get('pendingSend');
   if (!pendingSend || pendingSend.tabId !== tabId) return;
   await chrome.storage.local.remove('pendingSend');   // one attempt only
-  if (Date.now() - pendingSend.ts > PENDING_SEND_MAX_AGE_MS) {
-    console.warn('cw-assist: pendingSend for tab', tabId, 'expired before it ran');
-    return;
-  }
+  if (Date.now() - pendingSend.ts > PENDING_SEND_MAX_AGE_MS) return;
 
   try {
-    const [{ result } = {}] = await chrome.scripting.executeScript({
+    await chrome.scripting.executeScript({
       target: { tabId },
       func: ensurePromptSent,
-      args: [pendingSend.prompt, pendingSend.files || []]
+      args: [pendingSend.prompt]
     });
-    console.log('cw-assist: send/attach result for tab', tabId, result);
-
-    // Only commit the "already sent" watermark once attaching+sending
-    // looks like it actually went out — a failed attempt should leave
-    // those attachments still looking "new" next click, not lost.
-    if (pendingSend.files?.length && result?.ok && pendingSend.key && pendingSend.newestISO) {
-      const { handoffAttachments = {} } = await chrome.storage.local.get('handoffAttachments');
-      await chrome.storage.local.set({
-        handoffAttachments: { ...handoffAttachments, [pendingSend.key]: pendingSend.newestISO }
-      });
-    }
   } catch (e) {
     console.warn('cw-assist: could not arm send-fallback for tab', tabId, e);
   }
@@ -153,32 +119,23 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // Runs inside the Open WebUI page — kept as a plain, self-contained function
 // since chrome.scripting.executeScript serializes it and runs it there, not
 // here. DOM selectors are best-effort guesses at Open WebUI's chat composer
-// and file-attach control, and may need updating if its UI changes.
-// filesB64: [{ name, b64 }] — empty for a plain text-only send.
-function ensurePromptSent(promptText, filesB64) {
-  const log = (...a) => console.log('[cw-assist]', ...a);
-  filesB64 = filesB64 || [];
+// and may need updating if its UI changes.
+function ensurePromptSent(promptText) {
   const marker = promptText.slice(0, 30);
-  log('starting — files to attach:', filesB64.map(f => f.name), 'marker:', marker);
+  const deadline = Date.now() + 6000;
 
   const alreadySent = () => (document.body.innerText || '').includes(marker);
 
-  const findComposer = () => {
-    const el = document.querySelector('#chat-input') ||
-      document.querySelector('textarea[placeholder*="Message" i]') ||
-      document.querySelector('[contenteditable="true"]');
-    log('findComposer ->', el);
-    return el;
-  };
+  const findComposer = () =>
+    document.querySelector('#chat-input') ||
+    document.querySelector('textarea[placeholder*="Message" i]') ||
+    document.querySelector('[contenteditable="true"]');
 
-  const findSendBtn = composer => {
-    const el = document.querySelector('#send-message-button') ||
-      document.querySelector('button[aria-label*="Send message" i]') ||
-      (composer && composer.closest('form') &&
-        composer.closest('form').querySelector('button[type="submit"]'));
-    log('findSendBtn ->', el);
-    return el;
-  };
+  const findSendBtn = composer =>
+    document.querySelector('#send-message-button') ||
+    document.querySelector('button[aria-label*="Send message" i]') ||
+    (composer && composer.closest('form') &&
+      composer.closest('form').querySelector('button[type="submit"]'));
 
   function setNativeValue(el, value) {
     const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -187,139 +144,28 @@ function ensurePromptSent(promptText, filesB64) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  // Rich-text/contenteditable composers (ProseMirror, Lexical, Slate, ...)
-  // often ignore a plain .textContent write because it bypasses their
-  // internal editor model. execCommand is deprecated but still broadly
-  // implemented in Chrome and, unlike a raw DOM write, goes through the
-  // same input pipeline real typing does — so most such editors pick it up
-  // correctly. Try it first for contenteditable, fall back to the raw write.
-  function setEditableText(el, value) {
-    el.focus();
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    sel.addRange(range);
-    const ok = document.execCommand && document.execCommand('insertText', false, value);
-    log('setEditableText: execCommand insertText ->', ok);
-    if (!ok || !el.textContent.includes(value.slice(0, 20))) {
-      log('setEditableText: execCommand did not stick, falling back to textContent');
-      el.textContent = value;
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
-    }
-  }
-
-  function fillAndSend() {
-    log('fillAndSend: filling composer and sending');
+  function forceSend() {
     const composer = findComposer();
-    if (!composer) { log('fillAndSend: no composer, giving up'); return false; }
+    if (!composer) return;
     composer.focus();
     if (composer.tagName === 'TEXTAREA') {
       setNativeValue(composer, promptText);
     } else {
-      setEditableText(composer, promptText);
+      composer.textContent = promptText;
+      composer.dispatchEvent(new InputEvent('input', { bubbles: true }));
     }
     setTimeout(() => {
       const btn = findSendBtn(composer);
-      if (btn && !btn.disabled) { log('fillAndSend: clicking send button'); btn.click(); return; }
-      log('fillAndSend: no usable send button, dispatching Enter keydown instead');
+      if (btn && !btn.disabled) { btn.click(); return; }
       composer.dispatchEvent(new KeyboardEvent('keydown', {
         key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
       }));
-    }, 200);
-    return true;
+    }, 150);
   }
 
-  function b64ToFile(name, b64) {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const ext = (name.match(/\.([a-z0-9]+)$/i) || ['', ''])[1].toLowerCase();
-    const mime = {
-      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
-      pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain',
-      json: 'application/json', csv: 'text/csv', zip: 'application/zip'
-    }[ext] || 'application/octet-stream';
-    return new File([bytes], name, { type: mime });
-  }
-
-  // A file input for the composer's attach control is often rendered
-  // hidden in the DOM up front (a visible "+"/paperclip button just calls
-  // .click() on it) rather than created on demand — so look for one
-  // directly first. Only if that comes up empty do we try clicking
-  // anything that looks like an attach trigger and checking again.
-  function findFileInput() {
-    let input = document.querySelector('input[type="file"]');
-    if (input) return input;
-
-    const trigger = document.querySelector(
-      'button[aria-label*="attach" i], button[aria-label*="upload" i], ' +
-      'button[title*="attach" i], button[title*="upload" i], ' +
-      '[data-testid*="attach" i], [data-testid*="upload" i]'
-    );
-    log('findFileInput: no input up front, trigger candidate ->', trigger);
-    if (!trigger) return null;
-    trigger.click();
-    input = document.querySelector('input[type="file"]');
-    log('findFileInput: after clicking trigger ->', input);
-    return input;
-  }
-
-  // Prefers a real file input (what a click on the paperclip button feeds);
-  // falls back to simulating a drop onto the composer if none is found.
-  function attachFiles() {
-    let dt;
-    try {
-      dt = new DataTransfer();
-      filesB64.forEach(f => dt.items.add(b64ToFile(f.name, f.b64)));
-    } catch (e) {
-      log('attachFiles: failed building DataTransfer/File', e);
-      return false;
-    }
-
-    const input = findFileInput();
-    if (input) {
-      input.files = dt.files;
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    const composer = findComposer();
-    if (!composer) { log('attachFiles: no file input and no composer to drop onto'); return false; }
-    log('attachFiles: no file input found, simulating a drop onto the composer instead');
-    ['dragenter', 'dragover', 'drop'].forEach(type => {
-      composer.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
-    });
-    return true;
-  }
-
-  const filesLookAttached = () => {
-    const body = document.body.innerText || '';
-    return filesB64.every(f => body.includes(f.name));
-  };
-
-  return new Promise(resolve => {
-    if (!filesB64.length) {
-      // Text-only: give Open WebUI's own ?q= auto-send a chance first.
-      log('text-only path: waiting up to 6s for the marker to show up on its own');
-      const deadline = Date.now() + 6000;
-      (function tick() {
-        if (alreadySent()) { log('marker already visible — Open WebUI sent it itself'); return resolve({ ok: true }); }
-        if (Date.now() > deadline) { log('marker never showed up, forcing send'); return resolve({ ok: fillAndSend() }); }
-        setTimeout(tick, 400);
-      })();
-      return;
-    }
-
-    // Attachments: no ?q= was set, so this owns the whole sequence —
-    // attach, wait for them to register, then type the prompt and send.
-    log('attach path: attaching files, then will type + send');
-    if (!attachFiles()) return resolve({ ok: false, reason: 'no file input or composer found' });
-    const deadline = Date.now() + 8000;
-    (function tick() {
-      if (filesLookAttached()) { log('file name(s) now visible on page — proceeding to send'); return resolve({ ok: fillAndSend() }); }
-      if (Date.now() > deadline) { log('gave up waiting for file names to appear, sending anyway'); return resolve({ ok: fillAndSend() }); }
-      setTimeout(tick, 400);
-    })();
-  });
+  (function tick() {
+    if (alreadySent()) return;          // Open WebUI's own auto-send worked
+    if (Date.now() > deadline) { forceSend(); return; }
+    setTimeout(tick, 400);
+  })();
 }

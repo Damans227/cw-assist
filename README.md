@@ -13,9 +13,7 @@ and your own model (local Ollama/Open WebUI, or any OpenAI-compatible API).
 - **Standing report** — what's outstanding, across a whole board.
 - **Issue draft** — turns a ticket into a ready-to-file GitHub issue.
 - **Open in chat** — hands the ticket off to your own chat UI (e.g. Open WebUI),
-  with the ticket content pre-loaded. Tick **Attach new files** first and any
-  ticket attachments added since the last handoff ride along too — nothing
-  gets re-sent on later clicks, only what's new.
+  with the ticket content pre-loaded.
 
 Every prompt above is a template you can override in Settings.
 
@@ -56,13 +54,7 @@ GitHub API you configured — there's no backend of ours in between.
   endpoint's page — only on the tab it just opened, only to send the prompt
   it built, and only as a fallback for when the endpoint's own auto-send
   doesn't fire (see below).
-- **Attach new files** (checkbox next to "Open in chat", on by default —
-  untick it to send text only) downloads ticket attachments added since the
-  last handoff and drops them onto that same tab, the same way it types the
-  prompt in.
-- Everything is stored locally in the browser (`chrome.storage.local`, with
-  `unlimitedStorage` so a batch of attachments in transit to a chat isn't
-  capped at the ~10MB a normal extension gets).
+- Everything is stored locally in the browser (`chrome.storage.local`).
 
 ## Export / import settings
 
@@ -77,13 +69,10 @@ before being included.
   English button/label text on the page).
 - Self-hosted ConnectWise on a domain other than `*.myconnectwise.net` needs
   a manual permission grant (Settings → Grant access).
-- The "Open in chat" send-fallback (and the attachment drop) guesses at
-  your AI endpoint's chat-box markup, tuned against Open WebUI. If it ever
-  redesigns that page, either may stop finding the box — the initial
-  open/prompt-fill still works either way.
-- Attachments: any single file over 60MB, or a batch that would push a
-  single handoff's total over 400MB, gets skipped with a note in the
-  prompt rather than sent — comfortably under Open WebUI's own 500MB cap.
+- The "Open in chat" send-fallback guesses at your AI endpoint's chat-box
+  markup, tuned against Open WebUI. If it ever redesigns that page, the
+  fallback may stop finding the box — the initial open/prompt-fill still
+  works either way.
 
 ## Contributing
 

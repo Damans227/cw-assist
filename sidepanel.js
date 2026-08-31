@@ -325,7 +325,7 @@ function setView(v) {
   const onBoard  = view === 'board';
 
   $('ticketLaneBtns').hidden = !onTicket;   // ticketRun lives inside this row, hides with it
-  $('openChatWrap').hidden   = !onTicket;
+  $('openChat').hidden       = !onTicket;
   $('boardBtns').hidden      = !onBoard;
   $('boardRun').hidden       = !onBoard;
 
@@ -711,24 +711,12 @@ async function refreshOpenChatLabel() {
     : 'open this ticket in Open WebUI and ask for next steps';
 }
 
-// chrome.storage.local JSON-serializes values, which mangles a raw
-// Uint8Array — go through base64 (bounded ~33% overhead) instead. The
-// injected script on the other end reverses this with atob().
-function bytesToBase64(bytes) {
-  let bin = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
-
 $('openChat').onclick = async () => {
   if (!ticket) return;
   const b = $('openChat');
-  const label = b.textContent;
-  const sendAttachments = $('attachToggle').checked;
   b.disabled = true;
-  if (sendAttachments) b.textContent = 'Fetching attachments…';
   try {
-    const { url, isNew, root, prompt, files, key, newestISO } = await handoff(ticket, { sendAttachments });
+    const { url, isNew, root, prompt } = await handoff(ticket);
     const tab = await chrome.tabs.create({ url });
     if (isNew) {
       // background.js watches this tab for Open WebUI settling on /c/<id>
@@ -740,20 +728,13 @@ $('openChat').onclick = async () => {
     }
     // Open WebUI's own ?q= auto-send is racy against its chat-history load,
     // especially on an existing chat — background.js checks after the tab
-    // loads and, when there's nothing to attach, fills the prompt in itself
-    // if it never went out. When there are files, ?q= was skipped entirely
-    // and background.js drives the whole attach-then-send itself instead.
+    // loads and fills the prompt in itself if it never went out.
     await chrome.storage.local.set({
-      pendingSend: {
-        tabId: tab.id, prompt, ts: Date.now(),
-        files: files.map(f => ({ name: f.name, b64: bytesToBase64(f.bytes) })),
-        key, newestISO
-      }
+      pendingSend: { tabId: tab.id, prompt, ts: Date.now() }
     });
     window.close();
   } catch (e) {
     b.disabled = false;
-    b.textContent = label;
     $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
   }
 };
@@ -772,7 +753,7 @@ function openSettings() {
   $('ticketLaneBtns').hidden = true;
   $('boardBtns').hidden = true;
   $('boardRun').hidden = true;
-  $('openChatWrap').hidden = true;
+  $('openChat').hidden = true;
   $('settingsView').hidden = false;
   $('settings').textContent = '← Done';
   $('cfgExport').hidden = false;
@@ -804,11 +785,9 @@ $('settings').onclick = e => {
 
 /* --- export / import the whole config as a JSON file --- */
 
-// handoffChats/handoffAttachments are runtime data (which Open WebUI chat
-// belongs to which ticket, and what's already been sent, on this machine)
-// — never exported/imported as a setting.
-const RUNTIME_KEYS = ['clientId', 'handoffChats', 'handoffAttachments'];
-const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => !RUNTIME_KEYS.includes(k));
+// handoffChats is runtime data (which Open WebUI chat belongs to which
+// ticket, on this machine) — never exported/imported as a setting.
+const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => k !== 'clientId' && k !== 'handoffChats');
 
 // brief coloured note in the footer's left slot
 function footMsg(kind, text) {

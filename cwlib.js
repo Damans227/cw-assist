@@ -46,12 +46,7 @@ const DEFAULTS = {
   /* ---- "Open in chat" reuses the same Open WebUI chat per ticket instead of
      spawning a new one every click. background.js fills this in once it
      spots the chat id Open WebUI assigns after the first message. ---- */
-  handoffChats: {},            // { "<cwOrigin>|<ticketId>": "<chatId>" }
-
-  /* ---- watermark for the "Attach new files" checkbox: the dateEntered of
-     the newest ticket attachment already offered, so the next click only
-     considers ones added since. ---- */
-  handoffAttachments: {}       // { "<cwOrigin>|<ticketId>": "<ISO timestamp>" }
+  handoffChats: {}             // { "<cwOrigin>|<ticketId>": "<chatId>" }
 };
 
 // Same key shape used by background.js when it records a newly-created chat —
@@ -91,14 +86,13 @@ function promptVars(c, extra = {}) {
 
 /* ---- ConnectWise -------------------------------------------------- */
 
-async function cwHeaders() {
-  const { clientId, cwAppId } = await cfg();
-  return { 'cw-app-id': (cwAppId || 'bm-manageclient'), ...(clientId ? { clientId } : {}) };
-}
-
 async function api(path) {
+  const { clientId, cwAppId } = await cfg();
   const { rest } = await cwUrls();
-  const r = await fetch(`${rest}${path}`, { credentials: 'include', headers: await cwHeaders() });
+  const r = await fetch(`${rest}${path}`, {
+    credentials: 'include',
+    headers: { 'cw-app-id': (cwAppId || 'bm-manageclient'), ...(clientId ? { clientId } : {}) }
+  });
   if (r.status === 401 || r.status === 403) {
     throw new Error('ConnectWise rejected the request — reload a ConnectWise tab so the access key can be picked up.');
   }
@@ -133,63 +127,6 @@ async function notes(id) {
   // order by when it was written, not by the time entry logged against it
   .sort((a, b) => new Date(a.when || 0) - new Date(b.when || 0))
   .map((n, i) => ({ seq: i + 1, ...n }));
-}
-
-/* ---- attachments (for "Open in chat") --------------------------------
-   Ported from cw-export's documents(): same .eml skip (ConnectWise's own
-   email copies, not real attachments), same "too big, skip it, say so"
-   behavior, sized for handing files to Open WebUI's chat rather than
-   zipping them for disk — a per-handoff total cap on top of the per-file
-   one, well under Open WebUI's own upload ceiling.                     */
-
-const ATTACH_PER_FILE_CAP = 60 * 1048576;    // a single oversized log/dump gets skipped, noted
-const ATTACH_TOTAL_CAP    = 400 * 1048576;   // stay well under Open WebUI's 500MB ceiling
-
-// Everything with dateEntered later than `sinceISO` is "new"; pass null/''
-// for "everything on the ticket" (the first handoff for it). Returns the
-// downloaded files, what got skipped and why, and the watermark to store
-// for next time — advanced past skipped items too, so a too-big attachment
-// gets mentioned once rather than renagged on every later click.
-async function ticketAttachments(ticketId, sinceISO) {
-  const docs = await api(`/service/tickets/${ticketId}/documents?pageSize=500`);
-
-  let newestISO = sinceISO || null;
-  for (const d of docs) {
-    const when = d._info?.dateEntered;
-    if (when && (!newestISO || when > newestISO)) newestISO = when;
-  }
-
-  const candidates = docs
-    .filter(d => !/\.eml$/i.test(d._info?.filename || d.title || ''))
-    .filter(d => !sinceISO || (d._info?.dateEntered || '') > sinceISO)
-    .sort((a, b) => new Date(a._info?.dateEntered || 0) - new Date(b._info?.dateEntered || 0));
-
-  const { rest } = await cwUrls();
-  const headers = await cwHeaders();
-  const files = [], skipped = [];
-  let total = 0;
-
-  for (const d of candidates) {
-    const name = d._info?.filename || d.title || `document-${d.id}`;
-    try {
-      const r = await fetch(`${rest}/system/documents/${d.id}/download`, { credentials: 'include', headers });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const bytes = new Uint8Array(await r.arrayBuffer());
-
-      if (bytes.length > ATTACH_PER_FILE_CAP) {
-        skipped.push({ name, bytes: bytes.length, reason: 'too large' });
-      } else if (total + bytes.length > ATTACH_TOTAL_CAP) {
-        skipped.push({ name, bytes: bytes.length, reason: "over this run's size budget" });
-      } else {
-        files.push({ name, bytes });
-        total += bytes.length;
-      }
-    } catch (e) {
-      skipped.push({ name, bytes: null, reason: e.message || String(e) });
-    }
-  }
-
-  return { files, skipped, newestISO };
 }
 
 /* ---- prompts ------------------------------------------------------
@@ -561,23 +498,13 @@ async function chat(aiKey, aiBase, aiModel, system, userContent) {
 // diagnosis prompt; background.js watches that tab, notices Open WebUI
 // settle on `/c/<id>`, and remembers it against this ticket. Every click
 // after that opens `/c/<id>` directly with a short catch-up prompt instead.
-//
-// ?q= is Open WebUI's own auto-fill-and-send — reliable, proven, and rides
-// along whenever there's nothing to attach. When there IS something to
-// attach, q= is skipped: attaching a file and sending the message have to
-// happen as one client-side sequence in the SAME message, and racing our
-// own attach step against Open WebUI's own auto-send would risk the text
-// going out before the files are actually on it. So in that case
-// background.js's injected script drives the whole thing itself — attach,
-// confirm attached, then type the prompt and send.
-async function handoff(ticketId, { sendAttachments = false } = {}) {
+async function handoff(ticketId) {
   const c = await cfg();
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
-  const key = handoffKey(c.cwOrigin, ticketId);
-  const chatId = (c.handoffChats || {})[key];
+  const chatId = (c.handoffChats || {})[handoffKey(c.cwOrigin, ticketId)];
   const vars = promptVars(c, { ticket: ticketId });
 
-  let prompt = chatId
+  const prompt = chatId
     ? ((c.promptHandoffFollowup || '').trim()
         ? fillTemplate(c.promptHandoffFollowup, vars)
         : `fetch cw ticket ${ticketId} for the latest updates from the customer and advise what the next steps should be.`)
@@ -588,25 +515,12 @@ then work out what's going on — pull in similar past tickets if any help, plus
 - next diagnostic step
 - next useful thing to check, run, or ask`);
 
-  let files = [], skipped = [], newestISO = null;
-  if (sendAttachments) {
-    const since = (c.handoffAttachments || {})[key] || null;
-    ({ files, skipped, newestISO } = await ticketAttachments(ticketId, since));
-    if (files.length) {
-      prompt += `\n\nAttached — new since last time: ${files.map(f => f.name).join(', ')}.`;
-    }
-    if (skipped.length) {
-      prompt += `\n\n(Not attached — ${skipped.map(s => `${s.name} (${s.reason})`).join('; ')}.)`;
-    }
-  }
-
   const ids = (c.aiTools || '').split(',').map(s => s.trim()).filter(Boolean);
   const tools = ids.length
     ? `&tools=${encodeURIComponent(ids.join(','))}` +
       `&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
     : '';
   const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
-  const q = files.length ? '' : `&q=${encodeURIComponent(prompt)}`;
-  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}${q}`;
-  return { url, isNew: !chatId, root, prompt, files, key, newestISO };
+  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
+  return { url, isNew: !chatId, root, prompt };
 }
