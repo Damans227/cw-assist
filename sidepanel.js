@@ -6,7 +6,7 @@ let lastKey = '';
 let busy = false;
 let settingsOpen = false;   // while true, the tab poll must not swap the view out
 let boardTab = 'latest';    // 'latest' | 'history' — a view, switching it never calls the model
-let ticketLane = 'summary'; // 'summary' | 'standing' | 'similar' | 'ghissue' — which lane is showing
+let ticketLane = 'summary'; // 'summary' | 'standing' | 'ghissue' — which lane is showing
 
 /* ---- board summary history, kept in chrome.storage.local ------------ */
 
@@ -208,9 +208,7 @@ async function renderTicketLatest() {
     $('meta').textContent = '';
     return;
   }
-  $('out').innerHTML = ticketLane === 'similar'
-    ? renderSimilarTable(h.text || '')
-    : render(h.text || '(empty response)');
+  $('out').innerHTML = render(h.text || '(empty response)');
   $('sum').textContent = [h.company, h.summary].filter(Boolean).join(' · ');
   $('foot').textContent = `${h.noteCount ?? '?'} notes`;
   $('meta').textContent = `(As of ${fmtWhen(h.ts)})`;
@@ -226,8 +224,7 @@ function showTicketLane(lane) {
   $('ticketRun').hidden = isIssue;
   if (isIssue) return renderIssueLane();
 
-  $('ticketRun').textContent =
-    lane === 'summary' ? 'Run summary' : lane === 'standing' ? 'Run outstanding' : 'Find similar';
+  $('ticketRun').textContent = lane === 'summary' ? 'Run summary' : 'Run outstanding';
   return renderTicketLatest();
 }
 
@@ -445,204 +442,6 @@ function render(md) {
   return blocks.join('');
 }
 
-/* ---- similar-tickets lane: the model is asked for a strict 2-column
-   markdown table, reusing the same table parser the board-triage CSV
-   export already relies on (tableRows/tableCells, handles pipes-in-
-   backticks etc.) rather than inventing a second parsing scheme.       */
-
-function renderSimilarTable(text, { justRan = false } = {}) {
-  const t = tableRows(text || '');
-  const rows = (t?.body || [])
-    .map(cells => ({ num: (cells[0] || '').replace(/[^\d]/g, ''), summary: cells[1] || '' }))
-    .filter(r => r.num);   // drops the "— / No similar tickets found" placeholder row
-  if (!rows.length) {
-    return `<span class="idle">No similar past tickets turned up.${
-      justRan ? ' (This mechanism is new — a background tab was left open, worth a quick check.)' : ''
-    }</span>`;
-  }
-  return '<table class="similar-tbl"><thead><tr><th>Ticket</th><th>Summary</th></tr></thead><tbody>' +
-    rows.map(r => `<tr><td><a href="#" class="similar-link" data-ticket="${esc(r.num)}" title="click to copy the ticket number">${esc(r.num)}</a></td>` +
-      `<td>${esc(r.summary)}</td></tr>`).join('') +
-    '</tbody></table>';
-}
-
-// ConnectWise's modern client has no constructible ticket URL — the real
-// address bar shows a session-scoped SPA route (…ConnectWise.aspx?...
-// session=new#<opaque-hash>), not a predictable ?recid=-style link. So
-// rather than guess at a URL, copy the ticket number instead — a fast
-// paste into CW's own search, guaranteed to actually work.
-$('out').addEventListener('click', async e => {
-  const a = e.target.closest('.similar-link');
-  if (!a) return;
-  e.preventDefault();
-  try { await navigator.clipboard.writeText(a.dataset.ticket); } catch { return; }
-  const prior = a.title;
-  a.title = 'copied!';
-  a.classList.add('copied');
-  setTimeout(() => { a.title = prior; a.classList.remove('copied'); }, 1200);
-});
-
-/* ---- similar-tickets lane: runs through a real Open WebUI tab -------
-   The other lanes (Summary/Standing) call the model directly over
-   /chat/completions, which is fine — everything they need is the ticket
-   text already in the prompt. "Similar" needs the model to actually go
-   search past tickets, and that search only runs through Open WebUI's own
-   tool-calling pipeline (its knowledge-base tools, same as "ConnectWise
-   Manage Live"), which a raw completions call never gets — confirmed by
-   the same ticket returning real matches through the real chat page and
-   nothing through this lane's first attempt. So this drives an actual
-   (background) Open WebUI tab through the same proven mechanisms "Open in
-   chat" already uses — ?q= auto-send, &tools=/&tool_ids= activation,
-   reading the rendered reply back out — then feeds the result back into
-   the panel instead of leaving it in that tab. Real runs with heavy tool
-   use have taken well over a minute, so the wait and its timeouts are
-   generous on purpose.                                                  */
-
-function waitForTabComplete(tabId, timeoutMs = 20000) {
-  return new Promise(resolve => {
-    const deadline = Date.now() + timeoutMs;
-    (function check() {
-      chrome.tabs.get(tabId).then(tab => {
-        if (tab.status === 'complete' || Date.now() > deadline) return resolve();
-        setTimeout(check, 300);
-      }).catch(() => resolve());
-    })();
-  });
-}
-
-// Runs inside the Open WebUI page. Ensures the prompt actually sends (same
-// wait-then-force logic as background.js's text-only fallback — proven
-// reliable), then waits for the reply to show up and stop growing before
-// handing the newly-added page text back. See afterSend() below for why
-// this tracks the longest length seen rather than waiting for the page to
-// go byte-for-byte unchanged — the latter never reliably happens.
-function runSimilarSearch(promptText) {
-  const marker = promptText.slice(0, 30);
-  const baseline = (document.body.innerText || '').length;
-
-  const alreadySent = () => (document.body.innerText || '').includes(marker);
-
-  const findComposer = () =>
-    document.querySelector('#chat-input') ||
-    document.querySelector('textarea[placeholder*="Message" i]') ||
-    document.querySelector('[contenteditable="true"]');
-
-  const findSendBtn = composer =>
-    document.querySelector('#send-message-button') ||
-    document.querySelector('button[aria-label*="Send message" i]') ||
-    (composer && composer.closest('form') &&
-      composer.closest('form').querySelector('button[type="submit"]'));
-
-  function setNativeValue(el, value) {
-    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-    if (setter) setter.call(el, value); else el.value = value;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  function forceSend() {
-    const composer = findComposer();
-    if (!composer) return;
-    composer.focus();
-    if (composer.tagName === 'TEXTAREA') setNativeValue(composer, promptText);
-    else {
-      composer.textContent = promptText;
-      composer.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    }
-    setTimeout(() => {
-      const btn = findSendBtn(composer);
-      if (btn && !btn.disabled) { btn.click(); return; }
-      composer.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-      }));
-    }, 150);
-  }
-
-  return new Promise(resolve => {
-    const sendDeadline = Date.now() + 6000;
-    (function waitSent() {
-      if (alreadySent()) return afterSend();
-      if (Date.now() > sendDeadline) { forceSend(); return setTimeout(afterSend, 500); }
-      setTimeout(waitSent, 400);
-    })();
-
-    function afterSend() {
-      const answerDeadline = Date.now() + 300000;   // real heavy searches: 1-2+ minutes
-      // Turned out the real bug wasn't "the model paused longer than the
-      // window" at all — a run was caught fully finished (correct model,
-      // complete table, composer idle) while this was STILL waiting past
-      // 100s. Comparing the whole page for exact-byte equality was the
-      // actual problem: something elsewhere on the page (almost certainly
-      // the sidebar's relative timestamps — "9h", "13h" — which tick over
-      // on their own) nudges document.body.innerText just enough that it's
-      // never byte-identical for a full window, no matter how long that
-      // window is. So this tracks the longest length seen instead — real
-      // generation keeps growing it by a lot; incidental page churn
-      // doesn't grow it at all — and calls it done once nothing has
-      // exceeded that peak for a while. Much shorter window needed now
-      // that it isn't fighting unrelated noise.
-      const STABLE_TICKS = 20;   // ~15s with no new length record
-      let maxLen = 0, stableCount = 0;
-      (function poll() {
-        const now = document.body.innerText || '';
-        const added = now.length > baseline ? now.slice(baseline) : '';
-        if (!added) {
-          // nothing generated yet — don't count pre-content silence
-        } else if (added.length > maxLen) {
-          maxLen = added.length;
-          stableCount = 0;
-        } else {
-          stableCount++;
-          if (stableCount >= STABLE_TICKS) return resolve({ ok: true, text: added });
-        }
-        if (Date.now() > answerDeadline) return resolve({ ok: false, text: added });
-        setTimeout(poll, 750);
-      })();
-    }
-  });
-}
-
-async function askSimilarViaChat(ticketId) {
-  const c = await cfg();
-  if (!c.aiBase) throw new Error('No model server set — open settings and add it.');
-  const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
-
-  const rec = await ticketRecord(ticketId);
-  if (!rec.notes.length) throw new Error('No notes on this ticket');
-  const prompt = buildSimilarPrompt(c, rec);
-
-  const ids = (c.aiTools || '').split(',').map(s => s.trim()).filter(Boolean);
-  const tools = ids.length
-    ? `&tools=${encodeURIComponent(ids.join(','))}&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
-    : '';
-  // Always a brand-new chat, never the ticket's ongoing diagnosis chat —
-  // reopening an *existing* chat loads whatever model that conversation
-  // last used, and ?model= only reliably forces the model on a fresh one.
-  // "Similar" is a one-shot lookup, not something to build on turn by
-  // turn, so there's nothing lost by not reusing a chat here.
-  const url = `${root}/?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
-
-  const tab = await chrome.tabs.create({ url, active: false });
-  await waitForTabComplete(tab.id);
-  const [{ result } = {}] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id }, func: runSimilarSearch, args: [prompt]
-  });
-
-  // leave the tab open whenever the result is anything other than a normal
-  // multi-row table — a timeout, or a "no matches" empty state, are both
-  // exactly the cases worth being able to check: is that genuinely nothing
-  // similar, or did this cut off early again with something real still
-  // coming? Once this has proven itself reliably, that tab can start
-  // closing on any result — for now the closed-loop debugging matters more
-  // than one extra tab.
-  if (!result?.ok) {
-    throw new Error('The model never finished responding — left the tab open so you can check it.');
-  }
-  const gotRealRows = (tableRows(result.text || '')?.body || []).some(cells => /\d/.test(cells[0] || ''));
-  if (gotRealRows) await chrome.tabs.remove(tab.id).catch(() => {});
-  return { text: result.text, noteCount: rec.notes.length, company: rec.company, summary: rec.summary };
-}
-
 /* ---- run ------------------------------------------------------------ */
 
 document.querySelectorAll('#ticketLaneTabs .tab').forEach(btn => {
@@ -653,27 +452,22 @@ $('ticketRun').onclick = async () => {
   if (busy || !ticket) return;
   busy = true;
   $('ticketRun').disabled = true;
-  const waitLabel = ticketLane === 'similar'
-    ? 'Searching past tickets — this can take a few minutes'
-    : 'Reading the thread';
-  $('out').innerHTML = `<span class="wait">${waitLabel}…</span>`;
+  $('out').innerHTML = '<span class="wait">Reading the thread…</span>';
   $('foot').textContent = '';
 
   const t0 = Date.now();
   const show = () =>
     $('out').innerHTML =
-      `<span class="wait">${waitLabel} — ${((Date.now() - t0) / 1000).toFixed(0)}s…</span>`;
+      `<span class="wait">Reading the thread — ${((Date.now() - t0) / 1000).toFixed(0)}s…</span>`;
   show();
   const tick = setInterval(show, 1000);
 
   try {
-    const res = ticketLane === 'similar' ? await askSimilarViaChat(ticket) : await ask(ticketLane, ticket);
+    const res = await ask(ticketLane, ticket);
     clearInterval(tick);
     const ts = Date.now();
 
-    $('out').innerHTML = ticketLane === 'similar'
-      ? renderSimilarTable(res.text || '', { justRan: true })
-      : render(res.text || '(empty response)');
+    $('out').innerHTML = render(res.text || '(empty response)');
     $('sum').textContent = [res.company, res.summary].filter(Boolean).join(' · ');
     $('foot').textContent = `${res.noteCount} notes · ${((Date.now() - t0) / 1000).toFixed(1)}s`;
     $('meta').textContent = `(As of ${fmtWhen(ts)})`;
@@ -1160,13 +954,12 @@ async function testModel() {
 function builtinTemplate(name, c) {
   const cc = { ...c,
     vendorName: '{{vendor}}', domainFocus: '{{domain}}', boardExtraRules: '{{extraRules}}',
-    promptSystem: '', promptSummary: '', promptStanding: '', promptSimilar: '', promptBoard: '', promptIssue: '' };
+    promptSystem: '', promptSummary: '', promptStanding: '', promptBoard: '', promptIssue: '' };
   const V = { ticket: '{{ticket}}', company: '{{company}}' };
   switch (name) {
     case 'system'  : return buildSystem(cc);
     case 'summary' : return buildSummaryPrompt(cc, V);
     case 'standing': return buildStandingPrompt(cc, V);
-    case 'similar' : return buildSimilarPrompt(cc, V);
     case 'board'   : return buildBoardPrompt(cc);
     case 'issue'   : return buildIssuePrompt(cc, V, '{{repo}}');
     case 'handoff' : return `fetch cw ticket {{ticket}}.
@@ -1281,7 +1074,6 @@ async function renderSettings() {
       ${promptField('system',   'System prompt')}
       ${promptField('summary',  'Summary lane')}
       ${promptField('standing', 'Outstanding lane')}
-      ${promptField('similar',  'Similar-tickets lane')}
       ${promptField('board',    'Board triage')}
       ${promptField('issue',    'GitHub issue draft')}
       ${promptField('handoff',         '“Open in chat” prompt — new chat')}
