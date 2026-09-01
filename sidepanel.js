@@ -70,6 +70,41 @@ const fmtWhen = ts => new Date(ts).toLocaleString([], {
   month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
 });
 
+/* ---- header meta: "(As of ...)" becomes a human relative age, color-coded
+   by staleness — it doubles as a nudge that a summary is due a re-run ---- */
+
+function ageText(ms) {
+  const min = Math.floor(ms / 60000);
+  const hr  = Math.floor(ms / 3600000);
+  if (min < 1)  return 'just now';
+  if (min < 60) return `${min} min old`;
+  if (hr < 24)  return `${hr} hr old`;
+  const day = Math.floor(ms / 86400000), remHr = hr % 24;
+  const d = `${day} day${day === 1 ? '' : 's'}`;
+  return remHr ? `${d} ${remHr} hr old` : `${d} old`;
+}
+
+// fresh under 4h, worth a re-run under a day, stale beyond that — the board
+// or ticket has likely moved on since this summary was generated
+const ageClass = ms => ms < 4 * 3600000 ? 'age-ok' : ms < 86400000 ? 'age-warn' : 'age-bad';
+
+let metaTs = null;   // timestamp behind the age currently shown in #meta, or null
+
+function renderMetaAge() {
+  if (metaTs == null) return;
+  const ms = Date.now() - metaTs;
+  $('meta').textContent = `(${ageText(ms)})`;
+  $('meta').className = ageClass(ms);
+}
+
+// shows a live-aging, color-coded "(x hr old)" in the header meta slot
+function setMetaAge(ts) { metaTs = ts; renderMetaAge(); }
+
+// any other header meta text — resets the age class so it doesn't linger
+function setMeta(text = '') { metaTs = null; $('meta').textContent = text; $('meta').className = ''; }
+
+setInterval(renderMetaAge, 30000);   // keeps the age ticking up while the panel sits open
+
 // a naive split('|') breaks on a shell pipe the model left inside a code
 // span, e.g. `ss -tnp | grep 5902` — walk the row and ignore '|' while
 // inside backticks instead
@@ -172,20 +207,20 @@ async function renderBoardLatest() {
   if (!hist.length) {
     $('out').innerHTML = '<span class="idle">Summarise every open ticket and what to do first — hit Run summary.</span>';
     $('foot').textContent = '';
-    $('meta').textContent = '';
+    setMeta();
     return;
   }
   const h = hist[0];
   $('out').innerHTML = render(h.text || '(empty response)');
   $('foot').textContent = `${h.noteCount} open tickets`;
-  $('meta').textContent = `(As of ${fmtWhen(h.ts)})`;
+  setMetaAge(h.ts);
 }
 
 async function renderBoardHistoryTab() {
   const hist = await loadHistory();
   $('out').innerHTML = renderHistoryList(hist, { unit: 'open tickets', csv: true });
   $('foot').textContent = hist.length ? `${hist.length} saved run${hist.length === 1 ? '' : 's'}` : '';
-  $('meta').textContent = '';
+  setMeta();
   wireHistoryRows({
     loadEntries: loadHistory,
     onDelete: async id => { await deleteHistoryEntry(id); await renderBoardHistoryTab(); }
@@ -205,13 +240,13 @@ async function renderTicketLatest() {
   if (!h) {
     $('out').innerHTML = '<span class="idle">Nothing saved yet for this ticket — hit Run.</span>';
     $('foot').textContent = '';
-    $('meta').textContent = '';
+    setMeta();
     return;
   }
   $('out').innerHTML = render(h.text || '(empty response)');
   $('sum').textContent = [h.company, h.summary].filter(Boolean).join(' · ');
   $('foot').textContent = `${h.noteCount ?? '?'} notes`;
-  $('meta').textContent = `(As of ${fmtWhen(h.ts)})`;
+  setMetaAge(h.ts);
 }
 
 function showTicketLane(lane) {
@@ -253,7 +288,7 @@ async function renderIssueLane() {
   if (saved) { showIssueDraft(saved); return; }
 
   $('sum').textContent = '';
-  $('meta').textContent = '';
+  setMeta();
   $('foot').textContent = '';
 
   const repos = await loadRepos();
@@ -330,7 +365,7 @@ function setView(v) {
   $('boardRun').hidden       = !onBoard;
 
   $('num').textContent = onTicket ? ticket : (onBoard ? 'Board' : '—');
-  $('meta').textContent = '';
+  setMeta();
   $('sum').textContent = '';
   $('foot').textContent = '';
 
@@ -358,12 +393,26 @@ chrome.runtime.onMessage.addListener(msg => {
 
 const esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
+// the board triage table carries a trailing "Whose move" column that is not
+// meant to be read, only to color the row — Us gets a light-red background,
+// everything else (Customer / Third party / missing) is left alone
+function extractWhoseMove(head, body) {
+  const idx = head.findIndex(h => h.trim().toLowerCase() === 'whose move');
+  if (idx === -1) return { head, body, whoseMove: null };
+  return {
+    head: head.filter((_, i) => i !== idx),
+    body: body.map(r => r.filter((_, i) => i !== idx)),
+    whoseMove: body.map(r => (r[idx] || '').trim().toLowerCase())
+  };
+}
+
 function table(block) {
   const rows = block.split('\n').filter(l => l.trim().startsWith('|'));
   if (rows.length < 2 || !/^\s*\|[\s:|-]+\|\s*$/.test(rows[1])) return null;
 
-  const head = tableCells(rows[0]).map(capHead);
-  const body = rows.slice(2).map(tableCells);
+  const rawHead = tableCells(rows[0]).map(capHead);
+  const rawBody = rows.slice(2).map(tableCells);
+  const { head, body, whoseMove } = extractWhoseMove(rawHead, rawBody);
 
   // inside a cell there is no room for headings, so let a bold label like
   // "Blocked on:" start its own line rather than running on from the prose
@@ -374,7 +423,9 @@ function table(block) {
     .replace(/(<\/code>|\.|\))\s*(<span class="lbl">)/g, '$1<br>$2');
 
   return `<table><thead><tr>${head.map(h => `<th>${inline(h)}</th>`).join('')}</tr></thead>` +
-    `<tbody>${body.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    `<tbody>${body.map((r, i) =>
+      `<tr${whoseMove?.[i] === 'us' ? ' class="us-turn"' : ''}>${r.map(c => `<td>${inline(c)}</td>`).join('')}</tr>`
+    ).join('')}</tbody></table>`;
 }
 
 function render(md) {
@@ -470,7 +521,7 @@ $('ticketRun').onclick = async () => {
     $('out').innerHTML = render(res.text || '(empty response)');
     $('sum').textContent = [res.company, res.summary].filter(Boolean).join(' · ');
     $('foot').textContent = `${res.noteCount} notes · ${((Date.now() - t0) / 1000).toFixed(1)}s`;
-    $('meta').textContent = `(As of ${fmtWhen(ts)})`;
+    setMetaAge(ts);
 
     await saveTicketLatest(ticket, ticketLane, {
       ts,
@@ -546,7 +597,7 @@ async function showIssueDraft(entry) {
   const { title = '', body = '', company, summary, noteCount, ts, created, repo = '' } = entry;
 
   $('sum').textContent = [company, summary].filter(Boolean).join(' · ');
-  $('meta').textContent = created ? `Issue #${created.number} created` : 'Issue draft';
+  setMeta(created ? `Issue #${created.number} created` : 'Issue draft');
   $('foot').textContent = created
     ? `created ${fmtWhen(created.ts)}`
     : `${noteCount ?? '?'} notes${ts ? ' · drafted ' + fmtWhen(ts) : ''} · edit, then Finalize`;
@@ -634,7 +685,7 @@ async function showIssueDraft(entry) {
       $('ghMsg').innerHTML =
         `<span class="ok">Created <a href="${esc(url)}" target="_blank" rel="noreferrer">#${number}</a></span>`;
       $('ghFinalize').textContent = 'Created';
-      $('meta').textContent = `Issue #${number} created`;
+      setMeta(`Issue #${number} created`);
     } catch (e) {
       $('ghFinalize').disabled = false;
       $('ghRegen').disabled = false;
@@ -683,7 +734,7 @@ $('boardRun').onclick = async () => {
     const ts = Date.now();
     $('out').innerHTML = render(res.text || '(empty response)');
     $('foot').textContent = `${res.noteCount} open tickets · ${secs()}s`;
-    $('meta').textContent = `(As of ${fmtWhen(ts)})`;
+    setMetaAge(ts);
 
     await saveHistoryEntry({
       id: `${ts}-${Math.random().toString(36).slice(2, 8)}`,
@@ -759,7 +810,7 @@ function openSettings() {
   $('cfgExport').hidden = false;
   $('cfgImport').hidden = false;
   $('num').textContent = 'Settings';
-  $('meta').textContent = '';
+  setMeta();
   $('sum').textContent = '';
   $('foot').textContent = '';
   renderSettings();

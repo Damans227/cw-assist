@@ -1,8 +1,11 @@
-/* The worker now only opens the side panel and stores the ConnectWise
-   access key. Everything that talks to ConnectWise or the model runs in
-   the side panel instead — a service worker cannot use the certificate
-   exception you grant in a tab, so a self-signed model server is
-   unreachable from here. */
+/* The worker only opens the side panel, stores the ConnectWise access key,
+   and keeps the toolbar badge counting tickets waiting on us. Everything
+   else that talks to the model runs in the side panel instead — a service
+   worker cannot use the certificate exception you grant in a tab, so a
+   self-signed model server is unreachable from here. ConnectWise itself is
+   plain HTTPS, so the badge's own reads below are fine from a worker. */
+
+importScripts('cwlib.js');
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
@@ -21,6 +24,74 @@ chrome.runtime.onMessage.addListener((msg, _s, reply) => {
     });
     return true;
   }
+});
+
+/* ---- toolbar badge: how many open tickets are waiting on us --------
+   Deliberately not the model's nuanced "Whose move" board column — this
+   is a free, instant heuristic (who sent the last note, nothing read) so
+   it can run on a timer without burning tokens: last note from a contact,
+   or no notes at all, counts as waiting on us; last note from one of our
+   own members does not. It will call a few things wrong the same way the
+   old ticket *status* did (that's the whole problem this extension exists
+   to work around) — the side panel's AI-graded board table is still the
+   place to actually check a ticket, this is just the "should I look?" nudge
+   sitting on the icon before you open it.                              -- */
+
+const BADGE_ALARM = 'cw-assist-badge-refresh';
+const BADGE_PERIOD_MIN = 5;
+const BASE_TITLE = 'ConnectWise support assist';
+const TOOLTIP_LIST_CAP = 15;   // past this many, list the first N and say how many more
+
+async function refreshBadge() {
+  try {
+    const { clientId } = await chrome.storage.local.get('clientId');
+    if (!clientId) {
+      await chrome.action.setBadgeText({ text: '' });
+      await chrome.action.setTitle({ title: BASE_TITLE });
+      return;
+    }
+
+    const rows = await boardRows();
+    const open = rows.filter(t => !/resolved|closed/i.test(t.status?.name || ''));
+
+    const waiting = [];
+    for (const t of open) {
+      let side;
+      try { side = await lastNoteSide(t.id); }
+      catch { continue; }   // one ticket failing (e.g. no access) shouldn't blank the count
+      if (side !== 'vendor') waiting.push(t.id);   // 'customer' or no notes yet — both need us
+    }
+    waiting.sort((a, b) => b - a);
+    const usTurn = waiting.length;
+
+    await chrome.action.setBadgeText({ text: usTurn ? String(usTurn) : '' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#b3261e' });
+
+    // the extension icon's own hover tooltip is the only place this list is
+    // shown — no in-panel display for it, so it can afford to be blunt
+    if (usTurn) {
+      const shown = waiting.slice(0, TOOLTIP_LIST_CAP).join(', ');
+      const more = usTurn > TOOLTIP_LIST_CAP ? ` +${usTurn - TOOLTIP_LIST_CAP} more` : '';
+      await chrome.action.setTitle({
+        title: `${BASE_TITLE} — ${usTurn} ticket${usTurn === 1 ? '' : 's'} waiting on us\n${shown}${more}`
+      });
+    } else {
+      await chrome.action.setTitle({ title: BASE_TITLE });
+    }
+  } catch (e) {
+    console.warn('cw-assist: badge refresh failed', e);
+  }
+}
+
+// idempotent — re-arming an existing alarm just resets its schedule, so this
+// is safe to run every time the worker wakes, not just on install
+chrome.alarms.create(BADGE_ALARM, { periodInMinutes: BADGE_PERIOD_MIN, delayInMinutes: 0.1 });
+chrome.alarms.onAlarm.addListener(a => { if (a.name === BADGE_ALARM) refreshBadge(); });
+
+// refresh right away the first time a clientId shows up, rather than waiting
+// out the rest of the alarm period with an empty badge
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.clientId) refreshBadge();
 });
 
 /* "Open in chat" (sidepanel.js) opens a fresh Open WebUI chat for a ticket

@@ -129,6 +129,19 @@ async function notes(id) {
   .map((n, i) => ({ seq: i + 1, ...n }));
 }
 
+// Just who sent the most recent qualifying note — one API call, descending,
+// pageSize=1. notes() reads the whole thread and doesn't scale to polling
+// every open ticket on a timer; this is the cheap version for that, with no
+// LLM involved at all. Returns null for a ticket with no notes yet (a fresh,
+// untouched ticket — which still counts as waiting on us, just like 'customer'
+// does, since nobody has responded).
+async function lastNoteSide(id) {
+  const qs = `?format=markdown&conditions=${encodeURIComponent(COND)}` +
+             `&pageSize=1&page=1&orderby=${encodeURIComponent('sortByDate desc')}`;
+  const [n] = await api(`/service/tickets/${id}/allNotes${qs}`);
+  return n ? (n.member ? 'vendor' : 'customer') : null;
+}
+
 /* ---- prompts ------------------------------------------------------
    Each builder returns the user's override (with placeholders filled)
    when set, otherwise a de-branded default shaped by vendorName /
@@ -210,7 +223,7 @@ function buildBoardPrompt(c) {
   return `Produce a triage table for these open tickets.
 
 A markdown table, one row per ticket, columns exactly:
-Ticket | Company | Where things stand
+Ticket | Company | Where things stand | Whose move
 
 Sort by ticket number, highest first. Do not reorder by urgency or age.
 
@@ -225,18 +238,35 @@ Say the specifics. Include error strings, versions, identifiers and ticket numbe
 where they matter. Give the elapsed days whenever a ticket has been quiet more
 than a few days.
 
-Flag this inside that same column, in the same prose:
+Call out a broken promise inside that same column, in the same prose: if our own
+last note commits us to doing something (sending documentation, a link, a build,
+a fix, an email, a call) and there has been silence since, say so and give the
+elapsed days. The absence of any later note is the evidence — there will not be
+one saying we failed to deliver.
 
-- [OWED BY US] — our own last note commits us to doing something and it has not
-  happened. Sending documentation, a link, a build, a fix, an email, a call.
-  There will be no later note saying we failed to deliver — the absence of any
-  note since IS the evidence. So: if the last note is ours, contains a promise,
-  and several days have passed in silence, that is an unfulfilled promise. Flag
-  it and say how many days it has been.
+"Whose move" is a status ConnectWise itself cannot show reliably, especially on
+Instant Guru tickets. Exactly one of these three values, nothing else: \`Us\`,
+\`Customer\`, or \`Third party\` (vendor, upstream, internal team).
 
-Do NOT flag a ticket just because we asked the customer a question and they
-have not answered. That is the normal state of a support ticket and needs no
-label. Waiting on a customer is not a problem; a promise we dropped is.
+Decide it mechanically from who sent the LAST note, not from who ultimately
+owns the underlying question — those are different things:
+- Last note is ours, and it asks the customer something or asks them to do
+  something (even just "can you confirm / try / clarify …"): \`Customer\`. We
+  moved; now we are waiting on their reply. This is true even if our note
+  is part of working toward something we still owe overall — the immediate
+  next action is theirs, to answer us.
+- Last note is ours, and it does not ask them anything — it only promises
+  future work, states we are looking into it, or goes unanswered while we
+  owe a deliverable: \`Us\`.
+- Last note is the customer's, and it asks or tells us something: \`Us\`.
+- Last note is the customer's, and it is a bare acknowledgement with nothing
+  for us to act on ("thanks", "got it"): \`Customer\` — nothing pending.
+- Last note is from a third party (vendor, upstream): \`Third party\`.
+
+Do not put \`Us\` on a ticket just because we asked the customer a question and
+they have not answered — that is the normal state of a support ticket, and the
+rule above already resolves it to \`Customer\`. This column is read by the
+tool, not printed for a reader — keep it to exactly one of the three values.
 ${extra ? `\n${extra}\n` : ''}
 After the table, one line naming the one or two to do first, and why.`;
 }

@@ -30,6 +30,10 @@
   .tk{ display:flex; align-items:baseline; gap:9px; }
   .tk b{ font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:20px; font-weight:700; }
   .tk span{ font-size:15px; font-weight:600; color:var(--accent-dark); }
+  /* #meta's age reading — fresh/aging/stale nudges a re-run before it's trusted */
+  .tk span.age-ok{ color:var(--ok); }
+  .tk span.age-warn{ color:var(--warn); }
+  .tk span.age-bad{ color:var(--bad); }
   .sum{ margin:4px 0 0; font-size:14.5px; color:var(--mute);
         overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
@@ -85,6 +89,9 @@
                        font-weight:700; color:var(--accent-dark); white-space:nowrap; }
   main td code{ white-space:normal; word-break:break-word; }
   main tr:last-child td{ border-bottom:0; }
+  /* board triage table: the row is on us right now — a status Instant Guru
+     tickets can't show reliably, so flag it here instead */
+  main tr.us-turn td{ background:#fdecea; }
 
   main{ flex:1; overflow:auto; padding:14px; }
   main p{ margin:0 0 9px; color:var(--body); }
@@ -201,7 +208,6 @@
     <button class="tab" data-tab="history" title="every past run, saved on this machine">History</button>
   </div>
 </div>
-
 
 
 <main id="out"><span class="idle">Open a ticket in ConnectWise, then pick one.</span></main>
