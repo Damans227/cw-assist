@@ -258,6 +258,12 @@ owns the underlying question — those are different things:
 - Last note is ours, and it does not ask them anything — it only promises
   future work, states we are looking into it, or goes unanswered while we
   owe a deliverable: \`Us\`.
+- Last note is ours, and it is a closing or handback statement — we answered
+  in full, resolved the question, or told them what to do next (even without
+  a literal question mark: "let us know if it recurs", "open a new ticket if
+  you need more help") — with nothing left owed on our side: \`Customer\`.
+  Not asking a question does not by itself make it \`Us\`; only an actual
+  unpaid promise or an unanswered debt does.
 - Last note is the customer's, and it asks or tells us something: \`Us\`.
 - Last note is the customer's, and it is a bare acknowledgement with nothing
   for us to act on ("thanks", "got it"): \`Customer\` — nothing pending.
