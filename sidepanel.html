@@ -83,6 +83,12 @@
   main td .lbl{ display:inline-block; margin-top:5px; font-weight:600; color:var(--ink); }
   main td:first-child{ font-family:ui-monospace,"SF Mono",Menlo,monospace;
                        font-weight:700; color:var(--accent-dark); white-space:nowrap; }
+  /* the similar-tickets table is 2 columns (ticket, summary) rather than the
+     3-column board-triage shape the widths above are tuned for — free up
+     the second column, and make the ticket number a real link */
+  main table.similar-tbl td:nth-child(2){ width:auto; }
+  main table.similar-tbl td:first-child a{ color:inherit; text-decoration:none; }
+  main table.similar-tbl td:first-child a:hover{ text-decoration:underline; }
   main td code{ white-space:normal; word-break:break-word; }
   main tr:last-child td{ border-bottom:0; }
 
@@ -190,6 +196,7 @@
   <div class="tabs" id="ticketLaneTabs">
     <button class="tab on" data-lane="summary" title="what it is about, what was asked, what came back">Summary</button>
     <button class="tab" data-lane="standing" title="whose court, what we promised, what is unanswered">Outstanding</button>
+    <button class="tab" data-lane="similar" title="past tickets that look like the same issue">Similar</button>
     <button class="tab" data-lane="ghissue" title="draft a GitHub issue from this ticket, then create it">GitHub</button>
   </div>
   <button class="ghost" id="ticketRun" title="read the thread and ask the model again">Run summary</button>

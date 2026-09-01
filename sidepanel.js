@@ -6,7 +6,7 @@ let lastKey = '';
 let busy = false;
 let settingsOpen = false;   // while true, the tab poll must not swap the view out
 let boardTab = 'latest';    // 'latest' | 'history' — a view, switching it never calls the model
-let ticketLane = 'summary'; // 'summary' | 'standing' | 'ghissue' — which lane is showing
+let ticketLane = 'summary'; // 'summary' | 'standing' | 'similar' | 'ghissue' — which lane is showing
 
 /* ---- board summary history, kept in chrome.storage.local ------------ */
 
@@ -208,7 +208,9 @@ async function renderTicketLatest() {
     $('meta').textContent = '';
     return;
   }
-  $('out').innerHTML = render(h.text || '(empty response)');
+  $('out').innerHTML = ticketLane === 'similar'
+    ? renderSimilarTable(h.text || '')
+    : render(h.text || '(empty response)');
   $('sum').textContent = [h.company, h.summary].filter(Boolean).join(' · ');
   $('foot').textContent = `${h.noteCount ?? '?'} notes`;
   $('meta').textContent = `(As of ${fmtWhen(h.ts)})`;
@@ -224,7 +226,8 @@ function showTicketLane(lane) {
   $('ticketRun').hidden = isIssue;
   if (isIssue) return renderIssueLane();
 
-  $('ticketRun').textContent = lane === 'summary' ? 'Run summary' : 'Run outstanding';
+  $('ticketRun').textContent =
+    lane === 'summary' ? 'Run summary' : lane === 'standing' ? 'Run outstanding' : 'Find similar';
   return renderTicketLatest();
 }
 
@@ -442,6 +445,50 @@ function render(md) {
   return blocks.join('');
 }
 
+/* ---- similar-tickets lane: a flat "<ticket>: <summary>" list per line,
+   not markdown — rendered as a clickable 2-column table instead of prose --
+   ---------------------------------------------------------------------- */
+
+function parseSimilarTickets(text) {
+  const rows = [];
+  const re = /^\s*#?(\d{3,7})\s*[:\-–]\s*(.+)$/gm;
+  let m;
+  while ((m = re.exec(text || ''))) rows.push({ num: m[1], summary: m[2].trim() });
+  return rows;
+}
+
+// Best-effort ConnectWise ticket deep link — cw-assist has no way to learn
+// the exact URL scheme your instance's UI actually uses (unlike its REST
+// API, which is documented and stable), so this is a guess at the classic
+// permalink route CW itself has kept working for backward compatibility.
+// If it 404s or lands somewhere wrong for you, that's a quick fix once you
+// paste back a real ticket URL from your address bar.
+const cwTicketUrl = (origin, ticketId) =>
+  `${origin}/v4_6_release/services/system_io/Service/fv_sr100_request.rails` +
+  `?recordType=ServiceFV&recid=${encodeURIComponent(ticketId)}`;
+
+function renderSimilarTable(text) {
+  const rows = parseSimilarTickets(text);
+  if (!rows.length) return '<span class="idle">No similar past tickets turned up.</span>';
+  return '<table class="similar-tbl"><thead><tr><th>Ticket</th><th>Summary</th></tr></thead><tbody>' +
+    rows.map(r => `<tr><td><a href="#" class="similar-link" data-ticket="${esc(r.num)}">${esc(r.num)}</a></td>` +
+      `<td>${esc(r.summary)}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+// Opens in a new tab rather than navigating the current one — the side
+// panel is synced to whatever CW tab is active (watch-ticket.js), so
+// reusing the tab would swap the panel over to the clicked ticket and lose
+// the similar-tickets list you were just looking at.
+$('out').addEventListener('click', async e => {
+  const a = e.target.closest('.similar-link');
+  if (!a) return;
+  e.preventDefault();
+  const { cwOrigin } = await chrome.storage.local.get('cwOrigin');
+  if (!cwOrigin) return;
+  chrome.tabs.create({ url: cwTicketUrl(cwOrigin, a.dataset.ticket) });
+});
+
 /* ---- run ------------------------------------------------------------ */
 
 document.querySelectorAll('#ticketLaneTabs .tab').forEach(btn => {
@@ -452,13 +499,14 @@ $('ticketRun').onclick = async () => {
   if (busy || !ticket) return;
   busy = true;
   $('ticketRun').disabled = true;
-  $('out').innerHTML = '<span class="wait">Reading the thread…</span>';
+  const waitLabel = ticketLane === 'similar' ? 'Searching past tickets' : 'Reading the thread';
+  $('out').innerHTML = `<span class="wait">${waitLabel}…</span>`;
   $('foot').textContent = '';
 
   const t0 = Date.now();
   const show = () =>
     $('out').innerHTML =
-      `<span class="wait">Reading the thread — ${((Date.now() - t0) / 1000).toFixed(0)}s…</span>`;
+      `<span class="wait">${waitLabel} — ${((Date.now() - t0) / 1000).toFixed(0)}s…</span>`;
   show();
   const tick = setInterval(show, 1000);
 
@@ -467,7 +515,9 @@ $('ticketRun').onclick = async () => {
     clearInterval(tick);
     const ts = Date.now();
 
-    $('out').innerHTML = render(res.text || '(empty response)');
+    $('out').innerHTML = ticketLane === 'similar'
+      ? renderSimilarTable(res.text || '')
+      : render(res.text || '(empty response)');
     $('sum').textContent = [res.company, res.summary].filter(Boolean).join(' · ');
     $('foot').textContent = `${res.noteCount} notes · ${((Date.now() - t0) / 1000).toFixed(1)}s`;
     $('meta').textContent = `(As of ${fmtWhen(ts)})`;
@@ -954,12 +1004,13 @@ async function testModel() {
 function builtinTemplate(name, c) {
   const cc = { ...c,
     vendorName: '{{vendor}}', domainFocus: '{{domain}}', boardExtraRules: '{{extraRules}}',
-    promptSystem: '', promptSummary: '', promptStanding: '', promptBoard: '', promptIssue: '' };
+    promptSystem: '', promptSummary: '', promptStanding: '', promptSimilar: '', promptBoard: '', promptIssue: '' };
   const V = { ticket: '{{ticket}}', company: '{{company}}' };
   switch (name) {
     case 'system'  : return buildSystem(cc);
     case 'summary' : return buildSummaryPrompt(cc, V);
     case 'standing': return buildStandingPrompt(cc, V);
+    case 'similar' : return buildSimilarPrompt(cc, V);
     case 'board'   : return buildBoardPrompt(cc);
     case 'issue'   : return buildIssuePrompt(cc, V, '{{repo}}');
     case 'handoff' : return `fetch cw ticket {{ticket}}.
@@ -1074,6 +1125,7 @@ async function renderSettings() {
       ${promptField('system',   'System prompt')}
       ${promptField('summary',  'Summary lane')}
       ${promptField('standing', 'Outstanding lane')}
+      ${promptField('similar',  'Similar-tickets lane')}
       ${promptField('board',    'Board triage')}
       ${promptField('issue',    'GitHub issue draft')}
       ${promptField('handoff',         '“Open in chat” prompt — new chat')}

@@ -34,6 +34,7 @@ const DEFAULTS = {
   promptSystem  : '',
   promptSummary : '',
   promptStanding: '',
+  promptSimilar : '',
   promptBoard   : '',
   promptIssue   : '',
   promptHandoff        : '',   // first "Open in chat" for a ticket — full diagnosis
@@ -199,6 +200,30 @@ What we are waiting on from them.
 
 Nothing before the first heading and nothing after the last. If nothing is
 outstanding on our side, say so plainly under "We owe".`;
+}
+
+// Deliberately asks for nothing but a flat, strictly-formatted list — no
+// markdown, no headings — because sidepanel.js parses this one line by
+// line into a clickable table rather than rendering it as prose. Whatever
+// knowledge base or tool the model already has for past tickets (a
+// resolutions collection, a search tool, whatever you've wired up in your
+// own AI setup) is what actually finds the matches — this just tells it
+// what to look for and exactly how to hand the results back.
+function buildSimilarPrompt(c, t) {
+  const vars = promptVars(c, { ticket: t.ticket, company: t.company || 'unknown company' });
+  if ((c.promptSimilar || '').trim()) return fillTemplate(c.promptSimilar, vars);
+  return `Ticket ${vars.ticket} (${vars.company}). Search past tickets for similar issues — same
+symptom, same root cause, or same fix — not just the same general product area.
+
+Respond with ONLY a list, one match per line, in exactly this format:
+<ticket number>: <one-line summary of the issue and how it was resolved>
+
+Closest match first. At most 8 lines. If genuinely nothing similar turns up, respond
+with exactly:
+NONE
+
+No other text before, after, or between the lines — no headings, no numbering, no
+markdown formatting.`;
 }
 
 function buildBoardPrompt(c) {
@@ -372,7 +397,8 @@ async function ticketRecord(ticketId) {
 
 const LANE_PROMPT = {
   summary : buildSummaryPrompt,
-  standing: buildStandingPrompt
+  standing: buildStandingPrompt,
+  similar : buildSimilarPrompt
 };
 
 async function ask(action, ticketId) {
