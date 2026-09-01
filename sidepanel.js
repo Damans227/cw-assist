@@ -513,11 +513,9 @@ function waitForTabComplete(tabId, timeoutMs = 20000) {
 // Runs inside the Open WebUI page. Ensures the prompt actually sends (same
 // wait-then-force logic as background.js's text-only fallback — proven
 // reliable), then waits for the reply to show up and stop growing before
-// handing the newly-added page text back. The stability window (see
-// STABLE_TICKS below) has already had to grow twice — a heavy multi-tool
-// search visibly pauses between tool-call rounds, sometimes doing a second
-// round after the first ("let me search for more tickets…"), and there's
-// no real signal here for "done" beyond "stopped growing for a while."
+// handing the newly-added page text back. See afterSend() below for why
+// this tracks the longest length seen rather than waiting for the page to
+// go byte-for-byte unchanged — the latter never reliably happens.
 function runSimilarSearch(promptText) {
   const marker = promptText.slice(0, 30);
   const baseline = (document.body.innerText || '').length;
@@ -570,26 +568,32 @@ function runSimilarSearch(promptText) {
 
     function afterSend() {
       const answerDeadline = Date.now() + 300000;   // real heavy searches: 1-2+ minutes
-      // Went from ~6s to ~20s of no growth already, and it STILL cut off
-      // early on a search that did a second round of tool calls ("let me
-      // search for more tickets…") after the first — the gap between tool
-      // rounds isn't a fixed size, and 20s wasn't enough either. Up to ~60s
-      // now. This is an inherently imperfect proxy for "actually done"
-      // (there's no real completion signal being read, just "stopped
-      // growing for a while") — if it's still cutting off short searches
-      // too early even at this window, the fix is a completion signal from
-      // the page itself, not a bigger number here.
-      const STABLE_TICKS = 80;
-      let stableText = '', stableCount = 0;
+      // Turned out the real bug wasn't "the model paused longer than the
+      // window" at all — a run was caught fully finished (correct model,
+      // complete table, composer idle) while this was STILL waiting past
+      // 100s. Comparing the whole page for exact-byte equality was the
+      // actual problem: something elsewhere on the page (almost certainly
+      // the sidebar's relative timestamps — "9h", "13h" — which tick over
+      // on their own) nudges document.body.innerText just enough that it's
+      // never byte-identical for a full window, no matter how long that
+      // window is. So this tracks the longest length seen instead — real
+      // generation keeps growing it by a lot; incidental page churn
+      // doesn't grow it at all — and calls it done once nothing has
+      // exceeded that peak for a while. Much shorter window needed now
+      // that it isn't fighting unrelated noise.
+      const STABLE_TICKS = 20;   // ~15s with no new length record
+      let maxLen = 0, stableCount = 0;
       (function poll() {
         const now = document.body.innerText || '';
         const added = now.length > baseline ? now.slice(baseline) : '';
-        if (added && added === stableText) {
+        if (!added) {
+          // nothing generated yet — don't count pre-content silence
+        } else if (added.length > maxLen) {
+          maxLen = added.length;
+          stableCount = 0;
+        } else {
           stableCount++;
           if (stableCount >= STABLE_TICKS) return resolve({ ok: true, text: added });
-        } else {
-          stableText = added;
-          stableCount = 0;
         }
         if (Date.now() > answerDeadline) return resolve({ ok: false, text: added });
         setTimeout(poll, 750);
