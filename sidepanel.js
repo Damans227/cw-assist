@@ -510,23 +510,6 @@ function waitForTabComplete(tabId, timeoutMs = 20000) {
   });
 }
 
-// Same shape as background.js's pendingHandoff watcher, but done inline
-// here rather than via chrome.storage — this flow never closes the panel,
-// so there's no need to hand the wait off to the background script.
-function waitForNewChatId(tabId, root, timeoutMs) {
-  return new Promise(resolve => {
-    const deadline = Date.now() + timeoutMs;
-    (function check() {
-      chrome.tabs.get(tabId).then(tab => {
-        const m = (tab.url || '').match(/\/c\/([A-Za-z0-9-]+)/);
-        if (m && tab.url.startsWith(root)) return resolve(m[1]);
-        if (Date.now() > deadline) return resolve(null);
-        setTimeout(check, 500);
-      }).catch(() => resolve(null));
-    })();
-  });
-}
-
 // Runs inside the Open WebUI page. Ensures the prompt actually sends (same
 // wait-then-force logic as background.js's text-only fallback — proven
 // reliable), then waits for the reply to show up and stop growing before
@@ -613,8 +596,6 @@ function runSimilarSearch(promptText) {
 async function askSimilarViaChat(ticketId) {
   const c = await cfg();
   if (!c.aiBase) throw new Error('No model server set — open settings and add it.');
-  const key = handoffKey(c.cwOrigin, ticketId);
-  const chatId = (c.handoffChats || {})[key];
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
 
   const rec = await ticketRecord(ticketId);
@@ -625,21 +606,18 @@ async function askSimilarViaChat(ticketId) {
   const tools = ids.length
     ? `&tools=${encodeURIComponent(ids.join(','))}&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
     : '';
-  const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
-  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
+  // Always a brand-new chat, never the ticket's ongoing diagnosis chat —
+  // reopening an *existing* chat loads whatever model that conversation
+  // last used, and ?model= only reliably forces the model on a fresh one.
+  // "Similar" is a one-shot lookup, not something to build on turn by
+  // turn, so there's nothing lost by not reusing a chat here.
+  const url = `${root}/?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
 
   const tab = await chrome.tabs.create({ url, active: false });
   await waitForTabComplete(tab.id);
-  const [newChatId, [{ result } = {}]] = await Promise.all([
-    chatId ? Promise.resolve(null) : waitForNewChatId(tab.id, root, 240000),
-    chrome.scripting.executeScript({ target: { tabId: tab.id }, func: runSimilarSearch, args: [prompt] })
-  ]);
-
-  if (newChatId) {
-    await chrome.storage.local.set({
-      handoffChats: { ...(c.handoffChats || {}), [key]: newChatId }
-    });
-  }
+  const [{ result } = {}] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id }, func: runSimilarSearch, args: [prompt]
+  });
 
   // leave the tab open whenever the result is anything other than a normal
   // multi-row table — a timeout, or a "no matches" empty state, are both
