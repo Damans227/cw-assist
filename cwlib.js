@@ -215,15 +215,15 @@ function buildSimilarPrompt(c, t) {
   return `Ticket ${vars.ticket} (${vars.company}). Search past tickets for similar issues — same
 symptom, same root cause, or same fix — not just the same general product area.
 
-Respond with ONLY a list, one match per line, in exactly this format:
-<ticket number>: <one-line summary of the issue and how it was resolved>
+Respond with ONLY a markdown table, exactly two columns, nothing else — no headings,
+no analysis, no log excerpts, no other sections, nothing before or after it:
 
-Closest match first. At most 8 lines. If genuinely nothing similar turns up, respond
-with exactly:
-NONE
+| Ticket | Summary |
+|---|---|
+| <ticket number> | <one-line summary of the issue and how it was resolved> |
 
-No other text before, after, or between the lines — no headings, no numbering, no
-markdown formatting.`;
+Closest match first. At most 10 rows. If genuinely nothing similar turns up, reply with
+that same table shape but a single row: | — | No similar tickets found |`;
 }
 
 function buildBoardPrompt(c) {

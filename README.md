@@ -11,6 +11,11 @@ and your own model (local Ollama/Open WebUI, or any OpenAI-compatible API).
 
 - **Summary** — condenses a ticket's notes into a quick read.
 - **Standing report** — what's outstanding, across a whole board.
+- **Similar** — past tickets that look like the same issue, as a clickable
+  list. Runs through your actual AI chat UI in the background rather than a
+  plain model call, since finding similar tickets needs whatever knowledge
+  base or tools you've wired up there — can take a minute or two on a real
+  search.
 - **Issue draft** — turns a ticket into a ready-to-file GitHub issue.
 - **Open in chat** — hands the ticket off to your own chat UI (e.g. Open WebUI),
   with the ticket content pre-loaded.
@@ -54,6 +59,10 @@ GitHub API you configured — there's no backend of ours in between.
   endpoint's page — only on the tab it just opened, only to send the prompt
   it built, and only as a fallback for when the endpoint's own auto-send
   doesn't fire (see below).
+- "Similar" opens a background tab on your AI endpoint the same way, reads
+  the reply back once it's done, and closes the tab — only for that one
+  search, and it's left open instead of closed if anything goes wrong so
+  you can see what happened.
 - Everything is stored locally in the browser (`chrome.storage.local`).
 
 ## Export / import settings

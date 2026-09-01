@@ -445,49 +445,200 @@ function render(md) {
   return blocks.join('');
 }
 
-/* ---- similar-tickets lane: a flat "<ticket>: <summary>" list per line,
-   not markdown — rendered as a clickable 2-column table instead of prose --
-   ---------------------------------------------------------------------- */
-
-function parseSimilarTickets(text) {
-  const rows = [];
-  const re = /^\s*#?(\d{3,7})\s*[:\-–]\s*(.+)$/gm;
-  let m;
-  while ((m = re.exec(text || ''))) rows.push({ num: m[1], summary: m[2].trim() });
-  return rows;
-}
-
-// Best-effort ConnectWise ticket deep link — cw-assist has no way to learn
-// the exact URL scheme your instance's UI actually uses (unlike its REST
-// API, which is documented and stable), so this is a guess at the classic
-// permalink route CW itself has kept working for backward compatibility.
-// If it 404s or lands somewhere wrong for you, that's a quick fix once you
-// paste back a real ticket URL from your address bar.
-const cwTicketUrl = (origin, ticketId) =>
-  `${origin}/v4_6_release/services/system_io/Service/fv_sr100_request.rails` +
-  `?recordType=ServiceFV&recid=${encodeURIComponent(ticketId)}`;
+/* ---- similar-tickets lane: the model is asked for a strict 2-column
+   markdown table, reusing the same table parser the board-triage CSV
+   export already relies on (tableRows/tableCells, handles pipes-in-
+   backticks etc.) rather than inventing a second parsing scheme.       */
 
 function renderSimilarTable(text) {
-  const rows = parseSimilarTickets(text);
+  const t = tableRows(text || '');
+  const rows = (t?.body || [])
+    .map(cells => ({ num: (cells[0] || '').replace(/[^\d]/g, ''), summary: cells[1] || '' }))
+    .filter(r => r.num);   // drops the "— / No similar tickets found" placeholder row
   if (!rows.length) return '<span class="idle">No similar past tickets turned up.</span>';
   return '<table class="similar-tbl"><thead><tr><th>Ticket</th><th>Summary</th></tr></thead><tbody>' +
-    rows.map(r => `<tr><td><a href="#" class="similar-link" data-ticket="${esc(r.num)}">${esc(r.num)}</a></td>` +
+    rows.map(r => `<tr><td><a href="#" class="similar-link" data-ticket="${esc(r.num)}" title="click to copy the ticket number">${esc(r.num)}</a></td>` +
       `<td>${esc(r.summary)}</td></tr>`).join('') +
     '</tbody></table>';
 }
 
-// Opens in a new tab rather than navigating the current one — the side
-// panel is synced to whatever CW tab is active (watch-ticket.js), so
-// reusing the tab would swap the panel over to the clicked ticket and lose
-// the similar-tickets list you were just looking at.
+// ConnectWise's modern client has no constructible ticket URL — the real
+// address bar shows a session-scoped SPA route (…ConnectWise.aspx?...
+// session=new#<opaque-hash>), not a predictable ?recid=-style link. So
+// rather than guess at a URL, copy the ticket number instead — a fast
+// paste into CW's own search, guaranteed to actually work.
 $('out').addEventListener('click', async e => {
   const a = e.target.closest('.similar-link');
   if (!a) return;
   e.preventDefault();
-  const { cwOrigin } = await chrome.storage.local.get('cwOrigin');
-  if (!cwOrigin) return;
-  chrome.tabs.create({ url: cwTicketUrl(cwOrigin, a.dataset.ticket) });
+  try { await navigator.clipboard.writeText(a.dataset.ticket); } catch { return; }
+  const prior = a.title;
+  a.title = 'copied!';
+  a.classList.add('copied');
+  setTimeout(() => { a.title = prior; a.classList.remove('copied'); }, 1200);
 });
+
+/* ---- similar-tickets lane: runs through a real Open WebUI tab -------
+   The other lanes (Summary/Standing) call the model directly over
+   /chat/completions, which is fine — everything they need is the ticket
+   text already in the prompt. "Similar" needs the model to actually go
+   search past tickets, and that search only runs through Open WebUI's own
+   tool-calling pipeline (its knowledge-base tools, same as "ConnectWise
+   Manage Live"), which a raw completions call never gets — confirmed by
+   the same ticket returning real matches through the real chat page and
+   nothing through this lane's first attempt. So this drives an actual
+   (background) Open WebUI tab through the same proven mechanisms "Open in
+   chat" already uses — ?q= auto-send, &tools=/&tool_ids= activation,
+   reading the rendered reply back out — then feeds the result back into
+   the panel instead of leaving it in that tab. Real runs with heavy tool
+   use have taken well over a minute, so the wait and its timeouts are
+   generous on purpose.                                                  */
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise(resolve => {
+    const deadline = Date.now() + timeoutMs;
+    (function check() {
+      chrome.tabs.get(tabId).then(tab => {
+        if (tab.status === 'complete' || Date.now() > deadline) return resolve();
+        setTimeout(check, 300);
+      }).catch(() => resolve());
+    })();
+  });
+}
+
+// Same shape as background.js's pendingHandoff watcher, but done inline
+// here rather than via chrome.storage — this flow never closes the panel,
+// so there's no need to hand the wait off to the background script.
+function waitForNewChatId(tabId, root, timeoutMs) {
+  return new Promise(resolve => {
+    const deadline = Date.now() + timeoutMs;
+    (function check() {
+      chrome.tabs.get(tabId).then(tab => {
+        const m = (tab.url || '').match(/\/c\/([A-Za-z0-9-]+)/);
+        if (m && tab.url.startsWith(root)) return resolve(m[1]);
+        if (Date.now() > deadline) return resolve(null);
+        setTimeout(check, 500);
+      }).catch(() => resolve(null));
+    })();
+  });
+}
+
+// Runs inside the Open WebUI page. Ensures the prompt actually sends (same
+// wait-then-force logic as background.js's text-only fallback — proven
+// reliable), then waits for the reply to show up and stop growing before
+// handing the newly-added page text back. A stability window of several
+// seconds (not the ~1.5s a quick reply needs) on purpose: a heavy
+// multi-tool search visibly pauses between tool calls, and declaring
+// "done" during one of those gaps would hand back a half-finished answer.
+function runSimilarSearch(promptText) {
+  const marker = promptText.slice(0, 30);
+  const baseline = (document.body.innerText || '').length;
+
+  const alreadySent = () => (document.body.innerText || '').includes(marker);
+
+  const findComposer = () =>
+    document.querySelector('#chat-input') ||
+    document.querySelector('textarea[placeholder*="Message" i]') ||
+    document.querySelector('[contenteditable="true"]');
+
+  const findSendBtn = composer =>
+    document.querySelector('#send-message-button') ||
+    document.querySelector('button[aria-label*="Send message" i]') ||
+    (composer && composer.closest('form') &&
+      composer.closest('form').querySelector('button[type="submit"]'));
+
+  function setNativeValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function forceSend() {
+    const composer = findComposer();
+    if (!composer) return;
+    composer.focus();
+    if (composer.tagName === 'TEXTAREA') setNativeValue(composer, promptText);
+    else {
+      composer.textContent = promptText;
+      composer.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    }
+    setTimeout(() => {
+      const btn = findSendBtn(composer);
+      if (btn && !btn.disabled) { btn.click(); return; }
+      composer.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+      }));
+    }, 150);
+  }
+
+  return new Promise(resolve => {
+    const sendDeadline = Date.now() + 6000;
+    (function waitSent() {
+      if (alreadySent()) return afterSend();
+      if (Date.now() > sendDeadline) { forceSend(); return setTimeout(afterSend, 500); }
+      setTimeout(waitSent, 400);
+    })();
+
+    function afterSend() {
+      const answerDeadline = Date.now() + 240000;   // real heavy searches: 1-2+ minutes
+      let stableText = '', stableCount = 0;
+      (function poll() {
+        const now = document.body.innerText || '';
+        const added = now.length > baseline ? now.slice(baseline) : '';
+        if (added && added === stableText) {
+          stableCount++;
+          if (stableCount >= 8) return resolve({ ok: true, text: added });   // ~6s unchanged
+        } else {
+          stableText = added;
+          stableCount = 0;
+        }
+        if (Date.now() > answerDeadline) return resolve({ ok: false, text: added });
+        setTimeout(poll, 750);
+      })();
+    }
+  });
+}
+
+async function askSimilarViaChat(ticketId) {
+  const c = await cfg();
+  if (!c.aiBase) throw new Error('No model server set — open settings and add it.');
+  const key = handoffKey(c.cwOrigin, ticketId);
+  const chatId = (c.handoffChats || {})[key];
+  const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
+
+  const rec = await ticketRecord(ticketId);
+  if (!rec.notes.length) throw new Error('No notes on this ticket');
+  const prompt = buildSimilarPrompt(c, rec);
+
+  const ids = (c.aiTools || '').split(',').map(s => s.trim()).filter(Boolean);
+  const tools = ids.length
+    ? `&tools=${encodeURIComponent(ids.join(','))}&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
+    : '';
+  const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
+  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
+
+  const tab = await chrome.tabs.create({ url, active: false });
+  await waitForTabComplete(tab.id);
+  const [newChatId, [{ result } = {}]] = await Promise.all([
+    chatId ? Promise.resolve(null) : waitForNewChatId(tab.id, root, 240000),
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, func: runSimilarSearch, args: [prompt] })
+  ]);
+
+  if (newChatId) {
+    await chrome.storage.local.set({
+      handoffChats: { ...(c.handoffChats || {}), [key]: newChatId }
+    });
+  }
+
+  // leave the tab open on failure rather than closing it — the only way to
+  // see what actually went wrong is to look at it
+  if (!result?.ok) {
+    throw new Error('The model never finished responding — left the tab open so you can check it.');
+  }
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  return { text: result.text, noteCount: rec.notes.length, company: rec.company, summary: rec.summary };
+}
 
 /* ---- run ------------------------------------------------------------ */
 
@@ -499,7 +650,9 @@ $('ticketRun').onclick = async () => {
   if (busy || !ticket) return;
   busy = true;
   $('ticketRun').disabled = true;
-  const waitLabel = ticketLane === 'similar' ? 'Searching past tickets' : 'Reading the thread';
+  const waitLabel = ticketLane === 'similar'
+    ? 'Searching past tickets — this can take a minute or two'
+    : 'Reading the thread';
   $('out').innerHTML = `<span class="wait">${waitLabel}…</span>`;
   $('foot').textContent = '';
 
@@ -511,7 +664,7 @@ $('ticketRun').onclick = async () => {
   const tick = setInterval(show, 1000);
 
   try {
-    const res = await ask(ticketLane, ticket);
+    const res = ticketLane === 'similar' ? await askSimilarViaChat(ticket) : await ask(ticketLane, ticket);
     clearInterval(tick);
     const ts = Date.now();
 
