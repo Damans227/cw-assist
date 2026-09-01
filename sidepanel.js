@@ -513,10 +513,11 @@ function waitForTabComplete(tabId, timeoutMs = 20000) {
 // Runs inside the Open WebUI page. Ensures the prompt actually sends (same
 // wait-then-force logic as background.js's text-only fallback — proven
 // reliable), then waits for the reply to show up and stop growing before
-// handing the newly-added page text back. A stability window of several
-// seconds (not the ~1.5s a quick reply needs) on purpose: a heavy
-// multi-tool search visibly pauses between tool calls, and declaring
-// "done" during one of those gaps would hand back a half-finished answer.
+// handing the newly-added page text back. The stability window (see
+// STABLE_TICKS below) has already had to grow twice — a heavy multi-tool
+// search visibly pauses between tool-call rounds, sometimes doing a second
+// round after the first ("let me search for more tickets…"), and there's
+// no real signal here for "done" beyond "stopped growing for a while."
 function runSimilarSearch(promptText) {
   const marker = promptText.slice(0, 30);
   const baseline = (document.body.innerText || '').length;
@@ -568,13 +569,17 @@ function runSimilarSearch(promptText) {
     })();
 
     function afterSend() {
-      const answerDeadline = Date.now() + 240000;   // real heavy searches: 1-2+ minutes
-      // ~20s of no growth, not ~6s — a real multi-tool search visibly pauses
-      // for several seconds between rounds (waiting on a slow knowledge-base
-      // query, say), and 6s turned out to be well within that pause: it was
-      // catching a short "let me search…" acknowledgment and calling it done
-      // long before the actual answer arrived.
-      const STABLE_TICKS = 27;
+      const answerDeadline = Date.now() + 300000;   // real heavy searches: 1-2+ minutes
+      // Went from ~6s to ~20s of no growth already, and it STILL cut off
+      // early on a search that did a second round of tool calls ("let me
+      // search for more tickets…") after the first — the gap between tool
+      // rounds isn't a fixed size, and 20s wasn't enough either. Up to ~60s
+      // now. This is an inherently imperfect proxy for "actually done"
+      // (there's no real completion signal being read, just "stopped
+      // growing for a while") — if it's still cutting off short searches
+      // too early even at this window, the fix is a completion signal from
+      // the page itself, not a bigger number here.
+      const STABLE_TICKS = 80;
       let stableText = '', stableCount = 0;
       (function poll() {
         const now = document.body.innerText || '';
@@ -645,7 +650,7 @@ $('ticketRun').onclick = async () => {
   busy = true;
   $('ticketRun').disabled = true;
   const waitLabel = ticketLane === 'similar'
-    ? 'Searching past tickets — this can take a minute or two'
+    ? 'Searching past tickets — this can take a few minutes'
     : 'Reading the thread';
   $('out').innerHTML = `<span class="wait">${waitLabel}…</span>`;
   $('foot').textContent = '';
