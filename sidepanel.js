@@ -450,12 +450,16 @@ function render(md) {
    export already relies on (tableRows/tableCells, handles pipes-in-
    backticks etc.) rather than inventing a second parsing scheme.       */
 
-function renderSimilarTable(text) {
+function renderSimilarTable(text, { justRan = false } = {}) {
   const t = tableRows(text || '');
   const rows = (t?.body || [])
     .map(cells => ({ num: (cells[0] || '').replace(/[^\d]/g, ''), summary: cells[1] || '' }))
     .filter(r => r.num);   // drops the "— / No similar tickets found" placeholder row
-  if (!rows.length) return '<span class="idle">No similar past tickets turned up.</span>';
+  if (!rows.length) {
+    return `<span class="idle">No similar past tickets turned up.${
+      justRan ? ' (This mechanism is new — a background tab was left open, worth a quick check.)' : ''
+    }</span>`;
+  }
   return '<table class="similar-tbl"><thead><tr><th>Ticket</th><th>Summary</th></tr></thead><tbody>' +
     rows.map(r => `<tr><td><a href="#" class="similar-link" data-ticket="${esc(r.num)}" title="click to copy the ticket number">${esc(r.num)}</a></td>` +
       `<td>${esc(r.summary)}</td></tr>`).join('') +
@@ -582,13 +586,19 @@ function runSimilarSearch(promptText) {
 
     function afterSend() {
       const answerDeadline = Date.now() + 240000;   // real heavy searches: 1-2+ minutes
+      // ~20s of no growth, not ~6s — a real multi-tool search visibly pauses
+      // for several seconds between rounds (waiting on a slow knowledge-base
+      // query, say), and 6s turned out to be well within that pause: it was
+      // catching a short "let me search…" acknowledgment and calling it done
+      // long before the actual answer arrived.
+      const STABLE_TICKS = 27;
       let stableText = '', stableCount = 0;
       (function poll() {
         const now = document.body.innerText || '';
         const added = now.length > baseline ? now.slice(baseline) : '';
         if (added && added === stableText) {
           stableCount++;
-          if (stableCount >= 8) return resolve({ ok: true, text: added });   // ~6s unchanged
+          if (stableCount >= STABLE_TICKS) return resolve({ ok: true, text: added });
         } else {
           stableText = added;
           stableCount = 0;
@@ -631,12 +641,18 @@ async function askSimilarViaChat(ticketId) {
     });
   }
 
-  // leave the tab open on failure rather than closing it — the only way to
-  // see what actually went wrong is to look at it
+  // leave the tab open whenever the result is anything other than a normal
+  // multi-row table — a timeout, or a "no matches" empty state, are both
+  // exactly the cases worth being able to check: is that genuinely nothing
+  // similar, or did this cut off early again with something real still
+  // coming? Once this has proven itself reliably, that tab can start
+  // closing on any result — for now the closed-loop debugging matters more
+  // than one extra tab.
   if (!result?.ok) {
     throw new Error('The model never finished responding — left the tab open so you can check it.');
   }
-  await chrome.tabs.remove(tab.id).catch(() => {});
+  const gotRealRows = (tableRows(result.text || '')?.body || []).some(cells => /\d/.test(cells[0] || ''));
+  if (gotRealRows) await chrome.tabs.remove(tab.id).catch(() => {});
   return { text: result.text, noteCount: rec.notes.length, company: rec.company, summary: rec.summary };
 }
 
@@ -669,7 +685,7 @@ $('ticketRun').onclick = async () => {
     const ts = Date.now();
 
     $('out').innerHTML = ticketLane === 'similar'
-      ? renderSimilarTable(res.text || '')
+      ? renderSimilarTable(res.text || '', { justRan: true })
       : render(res.text || '(empty response)');
     $('sum').textContent = [res.company, res.summary].filter(Boolean).join(' · ');
     $('foot').textContent = `${res.noteCount} notes · ${((Date.now() - t0) / 1000).toFixed(1)}s`;
