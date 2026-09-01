@@ -49,12 +49,20 @@ async function refreshBadge() {
     if (!clientId) {
       await chrome.action.setBadgeText({ text: '' });
       await chrome.action.setTitle({ title: BASE_TITLE });
-      await chrome.storage.local.set({ waitingOnUsIds: [] });
+      await chrome.storage.local.set({ waitingOnUsIds: [], boardLastUpdated: {} });
       return;
     }
 
     const rows = await boardRows();
     const open = rows.filter(t => !/resolved|closed/i.test(t.status?.name || ''));
+
+    // board-highlight.js turns this into "(2 hr ago)" next to CW's own
+    // absolute Last Update timestamp — every open ticket, not just the
+    // ones waiting on us, since it's free (already fetched by boardRows())
+    const ages = {};
+    for (const t of open) {
+      if (t._info?.lastUpdated) ages[t.id] = t._info.lastUpdated;
+    }
 
     const waiting = [];
     for (const t of open) {
@@ -81,9 +89,9 @@ async function refreshBadge() {
       await chrome.action.setTitle({ title: BASE_TITLE });
     }
 
-    // board-highlight.js (content script) tints these rows directly on the
+    // board-highlight.js (content script) paints these directly onto the
     // real ConnectWise board — this is its only data source
-    await chrome.storage.local.set({ waitingOnUsIds: waiting });
+    await chrome.storage.local.set({ waitingOnUsIds: waiting, boardLastUpdated: ages });
   } catch (e) {
     console.warn('cw-assist: badge refresh failed', e);
   }
