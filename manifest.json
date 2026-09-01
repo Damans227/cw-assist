@@ -52,6 +52,15 @@
         "watch-ticket.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.myconnectwise.net/*"
+      ],
+      "js": [
+        "board-highlight.js"
+      ],
+      "run_at": "document_idle"
     }
   ],
   "side_panel": {

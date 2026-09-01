@@ -1,6 +1,7 @@
 /* The worker only opens the side panel, stores the ConnectWise access key,
-   and keeps the toolbar badge counting tickets waiting on us. Everything
-   else that talks to the model runs in the side panel instead — a service
+   and keeps the toolbar badge (and the id list board-highlight.js paints
+   onto the real board) counting tickets waiting on us. Everything else
+   that talks to the model runs in the side panel instead — a service
    worker cannot use the certificate exception you grant in a tab, so a
    self-signed model server is unreachable from here. ConnectWise itself is
    plain HTTPS, so the badge's own reads below are fine from a worker. */
@@ -48,6 +49,7 @@ async function refreshBadge() {
     if (!clientId) {
       await chrome.action.setBadgeText({ text: '' });
       await chrome.action.setTitle({ title: BASE_TITLE });
+      await chrome.storage.local.set({ waitingOnUsIds: [] });
       return;
     }
 
@@ -78,6 +80,10 @@ async function refreshBadge() {
     } else {
       await chrome.action.setTitle({ title: BASE_TITLE });
     }
+
+    // board-highlight.js (content script) tints these rows directly on the
+    // real ConnectWise board — this is its only data source
+    await chrome.storage.local.set({ waitingOnUsIds: waiting });
   } catch (e) {
     console.warn('cw-assist: badge refresh failed', e);
   }
