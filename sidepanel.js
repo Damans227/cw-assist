@@ -360,7 +360,9 @@ function setView(v) {
   const onBoard  = view === 'board';
 
   $('ticketLaneBtns').hidden = !onTicket;   // ticketRun lives inside this row, hides with it
-  $('openChat').hidden       = !onTicket;
+  $('tkBtns').hidden         = !onTicket;   // wrapper too, or its grid gap
+  $('openChat').hidden       = !onTicket;   // still nudges boardRun off the edge
+  $('attachRun').hidden      = !onTicket;
   $('boardBtns').hidden      = !onBoard;
   $('boardRun').hidden       = !onBoard;
 
@@ -762,31 +764,131 @@ async function refreshOpenChatLabel() {
     : 'open this ticket in Open WebUI and ask for next steps';
 }
 
+// Opens (or reopens) this ticket's Open WebUI chat and closes the panel.
+// Both header buttons end here; they differ only in what they put in opts.
+async function openHandoff(opts = {}) {
+  const { url, isNew, root, prompt } = await handoff(ticket, opts);
+  const tab = await chrome.tabs.create({ url });
+  if (isNew) {
+    // background.js watches this tab for Open WebUI settling on /c/<id>
+    // and files the chat id away so the next click reuses it.
+    const { cwOrigin } = await chrome.storage.local.get('cwOrigin');
+    await chrome.storage.local.set({
+      pendingHandoff: { tabId: tab.id, ticket, cwOrigin, root, ts: Date.now() }
+    });
+  }
+  // Open WebUI's own ?q= auto-send is racy against its chat-history load,
+  // especially on an existing chat — background.js checks after the tab
+  // loads and fills the prompt in itself if it never went out.
+  await chrome.storage.local.set({
+    pendingSend: { tabId: tab.id, prompt, ts: Date.now() }
+  });
+  window.close();
+}
+
 $('openChat').onclick = async () => {
   if (!ticket) return;
   const b = $('openChat');
   b.disabled = true;
   try {
-    const { url, isNew, root, prompt } = await handoff(ticket);
-    const tab = await chrome.tabs.create({ url });
-    if (isNew) {
-      // background.js watches this tab for Open WebUI settling on /c/<id>
-      // and files the chat id away so the next click reuses it.
-      const { cwOrigin } = await chrome.storage.local.get('cwOrigin');
-      await chrome.storage.local.set({
-        pendingHandoff: { tabId: tab.id, ticket, cwOrigin, root, ts: Date.now() }
-      });
-    }
-    // Open WebUI's own ?q= auto-send is racy against its chat-history load,
-    // especially on an existing chat — background.js checks after the tab
-    // loads and fills the prompt in itself if it never went out.
-    await chrome.storage.local.set({
-      pendingSend: { tabId: tab.id, prompt, ts: Date.now() }
-    });
-    window.close();
+    await openHandoff();
   } catch (e) {
     b.disabled = false;
     $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
+  }
+};
+
+/* ---- attachments -----------------------------------------------------
+
+   Pushes anything ConnectWise has on the ticket that the model's terminal
+   hasn't already got, then opens the chat pointed at those paths. Files
+   already sent on a previous click are named in the prompt but not
+   re-uploaded — that is the whole reason the sandbox is used over a chat
+   attachment, which would have to be re-sent every time.
+
+   When something is skipped we stop on the list rather than opening the
+   chat: opening a tab closes this panel, and an error nobody sees is not
+   an error report. The "Send anyway" button is there for when the missing
+   file doesn't matter.                                                   */
+
+const fileSize = n =>
+  n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB`
+  : n >= 1024  ? `${Math.round(n / 1024)} KB`
+  : `${n} B`;
+
+function renderAttachResult(res) {
+  const sent = res.all.length
+    ? `<h4>On the model's terminal</h4><ul>${res.all.map(f =>
+        `<li><code>${esc(f.name)}</code> — ${fileSize(f.size)}</li>`).join('')}</ul>`
+    : '';
+  const bad = res.skipped.length
+    ? `<h4>Not sent</h4><ul class="err">${res.skipped.map(f =>
+        `<li><code>${esc(f.filename)}</code> — ${esc(f.why)}</li>`).join('')}</ul>`
+    : '';
+  const go = res.all.length && res.skipped.length
+    ? `<div class="ghactions"><button class="run" id="attachAnyway">Analyse the rest &rarr;</button></div>`
+    : '';
+  $('out').innerHTML = sent + bad + go;
+  if (go) {
+    $('attachAnyway').onclick = async () => {
+      $('attachAnyway').disabled = true;
+      const c = await cfg();
+      try {
+        await openHandoff({ prompt: buildAttachPrompt(c, ticket, res.all), terminalId: res.termId });
+      } catch (e) {
+        $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
+      }
+    };
+  }
+}
+
+$('attachRun').onclick = async () => {
+  if (!ticket || busy) return;
+  busy = true;
+  const b = $('attachRun');
+  b.disabled = true;
+  $('foot').textContent = '';
+  $('out').innerHTML = '<span class="wait">Listing attachments…</span>';
+  try {
+    const res = await pushAttachments(ticket, p => {
+      // total is 0 when the server sends no length — show what has moved so
+      // far and an indeterminate bar rather than a percentage we cannot know
+      const pct = p.total ? Math.min(100, Math.round(p.loaded / p.total * 100)) : null;
+      const verb = p.phase === 'up' ? 'Uploading' : 'Fetching';
+      $('out').innerHTML = `
+        <div class="prog">
+          <div class="prog-line">
+            <span class="prog-name">${verb} ${esc(p.name)}</span>
+            <span class="prog-pct">${pct === null ? fileSize(p.loaded) : pct + '%'}</span>
+          </div>
+          <div class="prog-bar${pct === null ? ' indet' : ''}"><i style="width:${pct ?? 0}%"></i></div>
+          <div class="prog-sub">File ${p.index} of ${p.of}${
+            p.total ? ` · ${fileSize(p.loaded)} of ${fileSize(p.total)}` : ''}</div>
+        </div>`;
+    });
+
+    if (!res.all.length && !res.skipped.length) {
+      $('out').innerHTML = res.total
+        ? '<span class="idle">Nothing to send — every attachment on this ticket is a ConnectWise email copy.</span>'
+        : '<span class="idle">This ticket has no attachments.</span>';
+      $('foot').textContent = '';
+      return;
+    }
+
+    $('foot').textContent =
+      `${res.uploaded.length} sent · ${res.all.length} on the terminal` +
+      (res.skipped.length ? ` · ${res.skipped.length} skipped` : '');
+
+    if (res.skipped.length) { renderAttachResult(res); return; }
+
+    const c = await cfg();
+    await openHandoff({ prompt: buildAttachPrompt(c, ticket, res.all), terminalId: res.termId });
+  } catch (e) {
+    $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
+    $('foot').textContent = '';
+  } finally {
+    busy = false;
+    b.disabled = false;
   }
 };
 
@@ -804,7 +906,9 @@ function openSettings() {
   $('ticketLaneBtns').hidden = true;
   $('boardBtns').hidden = true;
   $('boardRun').hidden = true;
+  $('tkBtns').hidden = true;
   $('openChat').hidden = true;
+  $('attachRun').hidden = true;
   $('settingsView').hidden = false;
   $('settings').textContent = '← Done';
   $('cfgExport').hidden = false;
@@ -838,7 +942,8 @@ $('settings').onclick = e => {
 
 // handoffChats is runtime data (which Open WebUI chat belongs to which
 // ticket, on this machine) — never exported/imported as a setting.
-const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => k !== 'clientId' && k !== 'handoffChats');
+const RUNTIME_KEYS = ['clientId', 'handoffChats', 'sandboxUploads'];
+const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => !RUNTIME_KEYS.includes(k));
 
 // brief coloured note in the footer's left slot
 function footMsg(kind, text) {
@@ -1005,7 +1110,8 @@ async function testModel() {
 function builtinTemplate(name, c) {
   const cc = { ...c,
     vendorName: '{{vendor}}', domainFocus: '{{domain}}', boardExtraRules: '{{extraRules}}',
-    promptSystem: '', promptSummary: '', promptStanding: '', promptBoard: '', promptIssue: '' };
+    promptSystem: '', promptSummary: '', promptStanding: '', promptBoard: '', promptIssue: '',
+    promptAttach: '' };
   const V = { ticket: '{{ticket}}', company: '{{company}}' };
   switch (name) {
     case 'system'  : return buildSystem(cc);
@@ -1018,6 +1124,7 @@ then work out what's going on — pull in similar past tickets if any help, plus
 - next diagnostic step
 - next useful thing to check, run, or ask`;
     case 'handoffFollowup': return `fetch cw ticket {{ticket}} for the latest updates from the customer and advise what the next steps should be.`;
+    case 'attach'  : return buildAttachPrompt(cc, '{{ticket}}', '{{files}}');
   }
   return '';
 }
@@ -1071,6 +1178,12 @@ async function renderSettings() {
       <input id="s_aiTools" data-key="aiTools" placeholder="connectwise">
       <div class="hint">Comma-separated Open WebUI tool ids switched on in chats opened by “Open in chat”.</div>
     </div>
+    <div class="set-row">
+      <label for="s_maxUploadMb">Attachment size limit (MB)</label>
+      <input id="s_maxUploadMb" data-key="maxUploadMb" type="number" min="1" placeholder="500">
+      <div class="hint">Anything larger is listed as skipped instead of being sent. Each file passes through
+        this browser whole, so the cap is really a memory limit.</div>
+    </div>
     <div class="set-inline">
       <button class="set-btn" id="setTest" type="button">Test connection</button>
       <span class="set-state" id="setTestState"></span>
@@ -1120,7 +1233,8 @@ async function renderSettings() {
       <div class="hint" style="margin:10px 0 4px">
         Prompt overrides — leave blank to use the built-in default, which already
         reflects the fields above. Placeholders:
-        <code>{{ticket}} {{company}} {{vendor}} {{domain}} {{repo}} {{extraRules}}</code>.
+        <code>{{ticket}} {{company}} {{vendor}} {{domain}} {{repo}} {{extraRules}}</code>,
+        plus <code>{{files}}</code> in the attachments prompt.
       </div>
       ${promptField('system',   'System prompt')}
       ${promptField('summary',  'Summary lane')}
@@ -1129,6 +1243,7 @@ async function renderSettings() {
       ${promptField('issue',    'GitHub issue draft')}
       ${promptField('handoff',         '“Open in chat” prompt — new chat')}
       ${promptField('handoffFollowup', '“Continue chat” prompt — chat already exists')}
+      ${promptField('attach',          '“Attachments” prompt — analyse what was sent')}
     </details>`;
 
   // generic bind for every [data-key] field

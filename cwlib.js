@@ -22,6 +22,7 @@ const DEFAULTS = {
   aiKey  : '',
   aiModel: '',
   aiTools: '',                 // comma-separated Open WebUI tool ids for handoff
+  maxUploadMb: 500,            // per-file cap when pushing attachments to the sandbox
 
   /* ---- how the assistant frames the work ---- */
   vendorName     : '',         // your team / company; blank => "our team"
@@ -38,6 +39,7 @@ const DEFAULTS = {
   promptIssue   : '',
   promptHandoff        : '',   // first "Open in chat" for a ticket — full diagnosis
   promptHandoffFollowup: '',   // later clicks, once a chat already exists — catch-up
+  promptAttach         : '',   // "Attachments" — analyse what was pushed to the sandbox
 
   /* ---- GitHub issue lane ---- */
   ghRepos: [],                 // [{ name, repo }] — repo is "owner/name" or a URL
@@ -46,7 +48,12 @@ const DEFAULTS = {
   /* ---- "Open in chat" reuses the same Open WebUI chat per ticket instead of
      spawning a new one every click. background.js fills this in once it
      spots the chat id Open WebUI assigns after the first message. ---- */
-  handoffChats: {}             // { "<cwOrigin>|<ticketId>": "<chatId>" }
+  handoffChats: {},            // { "<cwOrigin>|<ticketId>": "<chatId>" }
+
+  /* ---- which ticket attachments already sit in the model's terminal sandbox,
+     so a second "Attachments" click only pushes what is new. Keyed by the
+     ConnectWise document id, which is stable across renames. ---- */
+  sandboxUploads: {}           // { "<key>": { "<docId>": { name, path, size, at } } }
 };
 
 // Same key shape used by background.js when it records a newly-created chat —
@@ -79,14 +86,14 @@ function promptVars(c, extra = {}) {
     vendor    : vendorProse(c),
     domain    : (c.domainFocus || '').trim(),
     extraRules: (c.boardExtraRules || '').trim(),
-    ticket: '', company: '', repo: '',
+    ticket: '', company: '', repo: '', files: '',
     ...extra
   };
 }
 
 /* ---- ConnectWise -------------------------------------------------- */
 
-async function api(path) {
+async function apiFetch(path) {
   const { clientId, cwAppId } = await cfg();
   const { rest } = await cwUrls();
   const r = await fetch(`${rest}${path}`, {
@@ -97,8 +104,10 @@ async function api(path) {
     throw new Error('ConnectWise rejected the request — reload a ConnectWise tab so the access key can be picked up.');
   }
   if (!r.ok) throw new Error(`ConnectWise returned HTTP ${r.status}`);
-  return r.json();
+  return r;
 }
+
+const api = async path => (await apiFetch(path)).json();
 
 async function notes(id) {
   const out = [];
@@ -521,6 +530,240 @@ async function chat(aiKey, aiBase, aiModel, system, userContent) {
   return text;
 }
 
+/* ---- ticket attachments -> the model's terminal sandbox ---------------
+
+   Open WebUI's terminal is a real filesystem the model can read, extract
+   and grep. Anything pushed there is usable whatever it is — a log, a
+   screenshot, a support bundle — which a chat attachment is not: that path
+   text-extracts, so a .tar.gz arrives as nothing.
+
+   The bytes go ConnectWise -> this page -> the sandbox. Nothing is written
+   to disk, but a file is held whole in memory on the way through, which is
+   what maxUploadMb is really capping.                                    */
+
+// Every real attachment on a ticket. ConnectWise files its own copy of each
+// notification email as a .eml against the ticket, and there are usually
+// more of those than actual files, so they never make the list.
+async function documents(ticketId) {
+  const docs = await api(`/service/tickets/${ticketId}/documents?pageSize=500`);
+  return docs
+    .map(d => ({ id: d.id, filename: d._info?.filename || d.title || `document-${d.id}` }))
+    .filter(d => !/\.eml$/i.test(d.filename));
+}
+
+// The name this file gets in the sandbox. ConnectWise filenames routinely
+// carry spaces and non-ASCII ("Captura de pantalla 2026-08-13 092810.png"),
+// which the model then has to quote correctly every time it shells out —
+// so flatten to something a command line cannot trip over.
+const safeName = s =>
+  String(s).replace(/[^\w.\-]+/g, '_').replace(/_+/g, '_').replace(/^[._]+/, '').slice(-120) || 'file';
+
+// Read in chunks rather than one await on .blob(): a support bundle takes
+// long enough that a caller with nothing to show looks hung. The cap is
+// checked off Content-Length first where ConnectWise sends one, so an
+// oversized file is never pulled into memory just to be rejected. Returns
+// { size } and no blob when it is too big to take.
+async function documentBytes(docId, cap, onProgress) {
+  const r = await apiFetch(`/system/documents/${docId}/download`);
+  const declared = Number(r.headers.get('content-length')) || 0;
+  if (declared > cap) { r.body?.cancel?.(); return { size: declared }; }
+
+  if (!r.body?.getReader) {                       // no streams — take it whole
+    const blob = await r.blob();
+    return blob.size > cap ? { size: blob.size } : { blob, size: blob.size };
+  }
+
+  const reader = r.body.getReader();
+  const parts = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    loaded += value.length;
+    if (loaded > cap) { reader.cancel(); return { size: loaded }; }
+    parts.push(value);
+    onProgress?.(loaded, declared);
+  }
+  return { blob: new Blob(parts), size: loaded };
+}
+
+/* ---- the sandbox side (Open WebUI's own API, not OpenAI-compatible) --- */
+
+// aiBase already ends in /api — these routes hang off it
+const aiRoot = c => (c.aiBase || '').trim().replace(/\/+$/, '');
+
+async function aiFetch(c, path, init = {}) {
+  const r = await fetch(`${aiRoot(c)}${path}`, {
+    ...init,
+    headers: { ...(c.aiKey ? { Authorization: `Bearer ${c.aiKey}` } : {}), ...(init.headers || {}) }
+  });
+  if (!r.ok) throw new Error(`${path.split('?')[0]} returned HTTP ${r.status}`);
+  return r;
+}
+
+// The terminal id and the home directory are both discovered, never assumed:
+// a list with no `directory` answers with the home path it defaulted to.
+async function sandbox(c) {
+  const list = await (await aiFetch(c, '/v1/terminals/')).json();
+  if (!Array.isArray(list) || !list.length) {
+    throw new Error('No terminal on the model server — open a chat there and switch the terminal on once.');
+  }
+  const id = list[0].id;
+  const { dir } = await (await aiFetch(c, `/v1/terminals/${id}/files/list`)).json();
+  return { id, home: (dir || '').replace(/\/+$/, '') };
+}
+
+// XHR rather than fetch: fetch cannot report how far an upload has got, and
+// on a bundle that is most of the wait. Content-Type is left unset either
+// way — the multipart boundary is the browser's to write.
+function sandboxUpload(c, termId, dir, filename, blob, onProgress) {
+  const body = new FormData();
+  body.append('file', blob, filename);
+  const url = `${aiRoot(c)}/v1/terminals/${termId}/files/upload?directory=${encodeURIComponent(dir)}`;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    if (c.aiKey) xhr.setRequestHeader('Authorization', `Bearer ${c.aiKey}`);
+    xhr.upload.onprogress = e => onProgress?.(e.loaded, e.lengthComputable ? e.total : 0);
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) return reject(new Error(`upload returned HTTP ${xhr.status}`));
+      try { resolve(JSON.parse(xhr.responseText).path); }
+      catch { reject(new Error('upload gave back no path')); }
+    };
+    xhr.onerror = () => reject(new Error('upload failed — could not reach the model server'));
+    xhr.send(body);
+  });
+}
+
+/* Pushes every attachment the sandbox has not already got, into its own
+   per-ticket directory. Returns what went, what did not and why, and the
+   full set now sitting there — a second click on the same ticket uploads
+   only what has landed on it since.                                      */
+async function pushAttachments(ticketId, onProgress) {
+  const c = await cfg();
+  const key = handoffKey(c.cwOrigin, ticketId);
+  const already = { ...((c.sandboxUploads || {})[key] || {}) };
+  const cap = Math.max(1, Number(c.maxUploadMb) || 500) * 1024 * 1024;
+
+  const docs = await documents(ticketId);
+  const uploaded = [], skipped = [];
+  const { id: termId, home } = await sandbox(c);
+  const dir = `${home}/cw-${ticketId}/`;            // created by the upload itself
+
+  // The sandbox is not permanent — it gets reset, and files can be deleted
+  // from the Files pane. A record of something that is no longer there would
+  // put a dead path in the prompt and send the model hunting for it, so the
+  // directory listing is the authority, not what we wrote down last time.
+  let onDisk = new Set();
+  try {
+    const { entries } = await (await aiFetch(c,
+      `/v1/terminals/${termId}/files/list?directory=${encodeURIComponent(dir)}`)).json();
+    onDisk = new Set((entries || []).map(e => e.name));
+  } catch { /* no such directory yet */ }
+  for (const [id, rec] of Object.entries(already)) if (!onDisk.has(rec.name)) delete already[id];
+  const fresh = docs.filter(d => !already[d.id]);
+
+  if (fresh.length) {
+    for (let i = 0; i < fresh.length; i++) {
+      const d = fresh[i];
+      const step = phase => (loaded, total) =>
+        onProgress?.({ index: i + 1, of: fresh.length, name: d.filename, phase, loaded, total });
+      step('down')(0, 0);
+      try {
+        const { blob, size } = await documentBytes(d.id, cap, step('down'));
+        if (!blob) {
+          skipped.push({ ...d, why: `${(size / 1048576).toFixed(0)} MB — over the ${c.maxUploadMb} MB limit` });
+          continue;
+        }
+        // two CW documents can carry the same filename; the sandbox would
+        // silently overwrite, so make it unique before it goes
+        const taken = new Set(Object.values(already).map(a => a.name));
+        const base = safeName(d.filename);
+        let name = base, n = 1;
+        while (taken.has(name)) {
+          const dot = base.lastIndexOf('.');
+          name = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`;
+          n++;
+        }
+        const path = await sandboxUpload(c, termId, dir, name, blob, step('up'));
+        const rec = { name, path, size, at: Date.now() };
+        already[d.id] = rec;
+        uploaded.push({ ...d, ...rec });
+      } catch (e) {
+        skipped.push({ ...d, why: String(e.message || e) });
+      }
+    }
+  }
+
+  await chrome.storage.local.set({
+    sandboxUploads: { ...(c.sandboxUploads || {}), [key]: already }
+  });
+
+  return { uploaded, skipped, all: Object.values(already), total: docs.length, termId, dir };
+}
+
+// `files` is the record list from pushAttachments; the settings preview
+// passes a literal '{{files}}' through instead, so an override keeps the
+// paths it would otherwise silently drop.
+function buildAttachPrompt(c, ticketId, files) {
+  const list = Array.isArray(files) ? files.map(f => `- ${f.path}`).join('\n') : String(files);
+  const vars = promptVars(c, { ticket: ticketId, files: list });
+  if ((c.promptAttach || '').trim()) return fillTemplate(c.promptAttach, vars);
+  const domain = (c.domainFocus || '').trim();
+  return `The attachments from ticket ${ticketId} are on your terminal:
+
+${list}
+
+Work out what each one is and open it the right way — extract archives, read
+logs and text, look at images. Do not guess at the contents of a file you have
+not actually opened, and say so if one turns out to be unreadable.
+
+Then tell me:
+- what each file actually shows
+- anything in there that explains the problem or moves the diagnosis on${domain ? `, in ${domain} terms` : ''}
+- what to check or ask for next`;
+}
+
+/* Two jobs, both about the chat we think this ticket owns.
+
+   A chat deleted in Open WebUI leaves its id behind here, and opening
+   /c/<gone> does not fail visibly — Open WebUI redirects to a fresh chat
+   and drops the whole query string on the way, so ?model= and ?q= are lost
+   and the handoff lands on the server's default model with no prompt (the
+   prompt only appears because background.js types it in as a fallback).
+   So confirm the chat is really there, and forget it if it is not.
+
+   And a chat remembers the model it was created with, which ?model= cannot
+   override on an existing chat — realign that through the API while we are
+   already asking about it.                                                */
+async function resolveChat(c, ticketId, chatId) {
+  if (!chatId) return null;
+  let rec;
+  try {
+    rec = await (await aiFetch(c, `/v1/chats/${chatId}`)).json();
+  } catch {
+    // gone (or unreachable) — drop it so the URL takes the new-chat route,
+    // where ?model= and ?q= are read
+    const { handoffChats = {} } = await chrome.storage.local.get('handoffChats');
+    delete handoffChats[handoffKey(c.cwOrigin, ticketId)];
+    await chrome.storage.local.set({ handoffChats });
+    return null;
+  }
+  const want = (c.aiModel || '').trim();
+  const models = rec?.chat?.models || [];
+  if (want && !(models.length === 1 && models[0] === want)) {
+    try {
+      await aiFetch(c, `/v1/chats/${chatId}`, {
+        method : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body   : JSON.stringify({ chat: { ...rec.chat, models: [want] } })
+      });
+    } catch { /* opening it still beats not opening it */ }
+  }
+  return chatId;
+}
+
 /* ---- hand off to Open WebUI ----------------------------------------- */
 
 // A chat opened from a URL selects the model but does NOT switch on the tools
@@ -534,13 +777,16 @@ async function chat(aiKey, aiBase, aiModel, system, userContent) {
 // diagnosis prompt; background.js watches that tab, notices Open WebUI
 // settle on `/c/<id>`, and remembers it against this ticket. Every click
 // after that opens `/c/<id>` directly with a short catch-up prompt instead.
-async function handoff(ticketId) {
+/* opts.prompt overrides the built-in ticket prompt (the attachment lane
+   sends its own); opts.terminalId attaches a sandbox to the chat, which is
+   what makes uploaded files visible to the model. */
+async function handoff(ticketId, opts = {}) {
   const c = await cfg();
   const root = (c.aiBase || '').replace(/\/api\/?$/, '').replace(/\/+$/, '');
-  const chatId = (c.handoffChats || {})[handoffKey(c.cwOrigin, ticketId)];
+  const stored = (c.handoffChats || {})[handoffKey(c.cwOrigin, ticketId)];
   const vars = promptVars(c, { ticket: ticketId });
 
-  const prompt = chatId
+  const prompt = opts.prompt || (stored
     ? ((c.promptHandoffFollowup || '').trim()
         ? fillTemplate(c.promptHandoffFollowup, vars)
         : `fetch cw ticket ${ticketId} for the latest updates from the customer and advise what the next steps should be.`)
@@ -549,14 +795,17 @@ async function handoff(ticketId) {
         : `fetch cw ticket ${ticketId}.
 then work out what's going on — pull in similar past tickets if any help, plus anything else relevant, and tell me:
 - next diagnostic step
-- next useful thing to check, run, or ask`);
+- next useful thing to check, run, or ask`));
 
   const ids = (c.aiTools || '').split(',').map(s => s.trim()).filter(Boolean);
   const tools = ids.length
     ? `&tools=${encodeURIComponent(ids.join(','))}` +
       `&tool_ids=${encodeURIComponent(JSON.stringify(ids))}`
     : '';
+  const chatId = await resolveChat(c, ticketId, stored);
+
+  const term = opts.terminalId ? `&terminal_id=${encodeURIComponent(opts.terminalId)}` : '';
   const base = chatId ? `${root}/c/${chatId}` : `${root}/`;
-  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}&q=${encodeURIComponent(prompt)}`;
+  const url = `${base}?model=${encodeURIComponent(c.aiModel)}${tools}${term}&q=${encodeURIComponent(prompt)}`;
   return { url, isNew: !chatId, root, prompt };
 }
