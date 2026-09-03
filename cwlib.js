@@ -715,9 +715,16 @@ function buildAttachPrompt(c, ticketId, files) {
 
 ${list}
 
-Work out what each one is and open it the right way — extract archives, read
-logs and text, look at images. Do not guess at the contents of a file you have
-not actually opened, and say so if one turns out to be unreadable.
+Work out what each one is and open it the right way — extract archives, look at
+images, read short text files.
+
+Never read a log file whole. Check its size first, and on anything big work
+through the shell instead: grep for errors, exceptions and stack traces, tail
+the end, count what you find, then read only the surrounding lines that matter.
+Reading a full log is what blows your context before you have learnt anything.
+
+Do not guess at the contents of a file you have not actually opened, and say so
+if one turns out to be unreadable.
 
 Then tell me:
 - what each file actually shows
