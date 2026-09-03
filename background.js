@@ -14,8 +14,14 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, _s, reply) => {
-  // ticket pings from watch-ticket.js are for the side panel
-  if (msg && 'onTicket' in msg) return;
+  // ticket pings from watch-ticket.js are mainly for the side panel, but
+  // watch-ticket.js also re-pings when the note count on the open ticket
+  // changes — that's the cue to re-grade this one ticket now instead of
+  // leaving the row tinted for the rest of the poll period
+  if (msg && 'onTicket' in msg) {
+    if (msg.onTicket) recheckTicket(msg.onTicket);
+    return;
+  }
 
   // grab.js hands over the clientId from a ConnectWise tab
   if (msg && msg.clientId) {
@@ -42,6 +48,52 @@ const BADGE_ALARM = 'cw-assist-badge-refresh';
 const BADGE_PERIOD_MIN = 5;
 const BASE_TITLE = 'ConnectWise support assist';
 const TOOLTIP_LIST_CAP = 15;   // past this many, list the first N and say how many more
+
+// The badge, its tooltip and the id list board-highlight.js paints are all
+// the same one fact — write them together so a single-ticket recheck cannot
+// leave the count disagreeing with the tinted rows.
+async function paintBadge(ids) {
+  const waiting = [...ids].sort((a, b) => b - a);
+  const usTurn = waiting.length;
+
+  await chrome.action.setBadgeText({ text: usTurn ? String(usTurn) : '' });
+  await chrome.action.setBadgeBackgroundColor({ color: '#b3261e' });
+
+  // the extension icon's own hover tooltip is the only place this list is
+  // shown — no in-panel display for it, so it can afford to be blunt
+  if (usTurn) {
+    const shown = waiting.slice(0, TOOLTIP_LIST_CAP).join(', ');
+    const more = usTurn > TOOLTIP_LIST_CAP ? ` +${usTurn - TOOLTIP_LIST_CAP} more` : '';
+    await chrome.action.setTitle({
+      title: `${BASE_TITLE} — ${usTurn} ticket${usTurn === 1 ? '' : 's'} waiting on us\n${shown}${more}`
+    });
+  } else {
+    await chrome.action.setTitle({ title: BASE_TITLE });
+  }
+
+  // board-highlight.js (content script) paints these directly onto the
+  // real ConnectWise board — this is its only data source
+  await chrome.storage.local.set({ waitingOnUsIds: waiting });
+}
+
+// One ticket, one API call — for when a note has just been saved on the page
+// you are looking at. Deliberately narrow: it only moves a ticket the last
+// full pass already saw as open, so it cannot invent a row for a closed or
+// out-of-scope ticket you happen to have opened. boardLastUpdated is that
+// list of open ids, so a miss there is left to the next full pass.
+async function recheckTicket(id) {
+  const { clientId, waitingOnUsIds = [], boardLastUpdated = {} } =
+    await chrome.storage.local.get(['clientId', 'waitingOnUsIds', 'boardLastUpdated']);
+  if (!clientId || boardLastUpdated[id] === undefined) return;
+
+  let side;
+  try { side = await lastNoteSide(id); } catch { return; }
+
+  const waiting = new Set(waitingOnUsIds.map(Number));
+  const before = waiting.size;
+  if (side === 'vendor') waiting.delete(Number(id)); else waiting.add(Number(id));
+  if (waiting.size !== before) await paintBadge([...waiting]);
+}
 
 async function refreshBadge() {
   try {
@@ -71,27 +123,10 @@ async function refreshBadge() {
       catch { continue; }   // one ticket failing (e.g. no access) shouldn't blank the count
       if (side !== 'vendor') waiting.push(t.id);   // 'customer' or no notes yet — both need us
     }
-    waiting.sort((a, b) => b - a);
-    const usTurn = waiting.length;
-
-    await chrome.action.setBadgeText({ text: usTurn ? String(usTurn) : '' });
-    await chrome.action.setBadgeBackgroundColor({ color: '#b3261e' });
-
-    // the extension icon's own hover tooltip is the only place this list is
-    // shown — no in-panel display for it, so it can afford to be blunt
-    if (usTurn) {
-      const shown = waiting.slice(0, TOOLTIP_LIST_CAP).join(', ');
-      const more = usTurn > TOOLTIP_LIST_CAP ? ` +${usTurn - TOOLTIP_LIST_CAP} more` : '';
-      await chrome.action.setTitle({
-        title: `${BASE_TITLE} — ${usTurn} ticket${usTurn === 1 ? '' : 's'} waiting on us\n${shown}${more}`
-      });
-    } else {
-      await chrome.action.setTitle({ title: BASE_TITLE });
-    }
-
-    // board-highlight.js (content script) paints these directly onto the
-    // real ConnectWise board — this is its only data source
-    await chrome.storage.local.set({ waitingOnUsIds: waiting, boardLastUpdated: ages });
+    // ages first: board-highlight.js does nothing at all while
+    // boardLastUpdated is empty, so the ids have to land second
+    await chrome.storage.local.set({ boardLastUpdated: ages });
+    await paintBadge(waiting);
   } catch (e) {
     console.warn('cw-assist: badge refresh failed', e);
   }
