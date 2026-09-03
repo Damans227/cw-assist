@@ -253,11 +253,12 @@ function showTicketLane(lane) {
   ticketLane = lane;
   document.querySelectorAll('#ticketLaneTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.lane === lane));
 
-  // the GH issue lane carries its own action buttons, so the shared Run button
-  // steps aside for it
-  const isIssue = lane === 'ghissue';
-  $('ticketRun').hidden = isIssue;
-  if (isIssue) return renderIssueLane();
+  // the GH issue and Logs lanes carry their own action buttons, so the shared
+  // Run button steps aside for them
+  const own = lane === 'ghissue' || lane === 'logs';
+  $('ticketRun').hidden = own;
+  if (lane === 'ghissue') return renderIssueLane();
+  if (lane === 'logs')    return renderLogsLane();
 
   $('ticketRun').textContent = lane === 'summary' ? 'Run summary' : 'Run outstanding';
   return renderTicketLatest();
@@ -841,30 +842,47 @@ function renderAttachResult(res) {
   }
 }
 
-$('attachRun').onclick = async () => {
-  if (!ticket || busy) return;
-  const b = $('attachRun');
-  b.disabled = true;
+$('attachRun').onclick = () => { if (!busy && ticket) showTicketLane('logs'); };
+
+/* The lane paints the last listing straight away and refreshes underneath.
+   ConnectWise plus the sandbox is three round trips, and staring at an empty
+   pane for two seconds every time you switch tabs is worse than seeing the
+   names you saw last time with a note that they are being rechecked.     */
+async function renderLogsLane() {
+  $('sum').textContent = '';
+  setMeta();
   $('foot').textContent = '';
-  $('out').innerHTML = '<span class="wait">Listing attachments…</span>';
+
+  const cached = await cachedAttachments(ticket);
+  if (cached?.files?.length) {
+    renderPickList({ files: cached.files }, { stale: true });
+  } else {
+    $('out').innerHTML = '<span class="wait">Listing attachments…</span>';
+  }
+
+  const forTicket = ticket;               // a lane switch mid-flight must not repaint
   try {
-    const state = await attachmentState(ticket);
+    const state = await attachmentState(forTicket);
+    if (ticket !== forTicket || ticketLane !== 'logs') return;
     if (!state.files.length) {
       $('out').innerHTML = '<span class="idle">No attachments on this ticket.</span>';
       return;
     }
     renderPickList(state);
   } catch (e) {
-    $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
-  } finally {
-    b.disabled = false;
+    if (ticket !== forTicket || ticketLane !== 'logs') return;
+    if (!cached?.files?.length) {
+      $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
+    } else {
+      $('foot').textContent = `could not refresh — ${String(e.message || e)}`;
+    }
   }
-};
+}
 
 // Everything is ticked to start with. A ticket often carries one screenshot
 // worth looking at and one 200 MB bundle that is not, so the point of the
 // list is being able to take things off it before anything moves.
-function renderPickList(state) {
+function renderPickList(state, { stale = false } = {}) {
   const rows = state.files.map(f => `
     <label class="pick-row">
       <input type="checkbox" data-doc="${escAttr(f.id)}" checked>
@@ -879,12 +897,15 @@ function renderPickList(state) {
       ${rows}
       <button class="pick-all" id="pickAll" type="button">Clear all</button>
       <div class="ghactions"><button class="run" id="pickGo">Analyse &rarr;</button></div>
+      ${stale ? '<div class="prog-sub">Rechecking ConnectWise…</div>' : ''}
     </div>`;
 
   const boxes = () => [...$('out').querySelectorAll('input[data-doc]')];
   const sync = () => {
     const n = boxes().filter(b => b.checked).length;
-    $('pickGo').disabled = !n;
+    // a stale list is the previous run's; sending from it would upload
+    // against a terminal we have not re-checked, so it waits for the refresh
+    $('pickGo').disabled = !n || stale;
     $('pickGo').textContent = n ? `Analyse ${n} file${n === 1 ? '' : 's'} \u2192` : 'Nothing picked';
     $('pickAll').textContent = n ? 'Clear all' : 'Select all';
   };
@@ -987,7 +1008,7 @@ $('settings').onclick = e => {
 
 // handoffChats is runtime data (which Open WebUI chat belongs to which
 // ticket, on this machine) — never exported/imported as a setting.
-const RUNTIME_KEYS = ['clientId', 'handoffChats', 'sandboxUploads'];
+const RUNTIME_KEYS = ['clientId', 'handoffChats', 'sandboxUploads', 'attachLists'];
 const CONFIG_KEYS = Object.keys(DEFAULTS).filter(k => !RUNTIME_KEYS.includes(k));
 
 // brief coloured note in the footer's left slot

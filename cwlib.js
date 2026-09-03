@@ -53,7 +53,11 @@ const DEFAULTS = {
   /* ---- which ticket attachments already sit in the model's terminal sandbox,
      so a second "Attachments" click only pushes what is new. Keyed by the
      ConnectWise document id, which is stable across renames. ---- */
-  sandboxUploads: {}           // { "<key>": { "<docId>": { name, path, size, at } } }
+  sandboxUploads: {},          // { "<key>": { "<docId>": { name, path, size, at } } }
+
+  /* Last attachment listing per ticket, so the Logs lane can paint the names
+     you saw before instead of an empty pane while ConnectWise answers. */
+  attachLists: {}              // { "<key>": { at, files: [{ id, filename, sent, name, path, size }] } }
 };
 
 // Same key shape used by background.js when it records a newly-created chat —
@@ -678,12 +682,22 @@ async function attachmentState(ticketId) {
      was counted on the way through.                                       */
   const files = docs.map(d => ({ ...d, sent: !!already[d.id], ...(already[d.id] || {}) }));
 
+  const { attachLists = {} } = await chrome.storage.local.get('attachLists');
+  await chrome.storage.local.set({ attachLists: { ...attachLists, [key]: { at: Date.now(), files } } });
+
   return { termId, dir, key, already, files };
 }
 
 /* Sends the picked attachments the sandbox has not already got. `picks` is
    a list of ConnectWise document ids; anything already there is left alone
    but still comes back in `all`, which is what the prompt names.          */
+// What the Logs lane paints before the network answers: whatever the last
+// listing found. Null when this ticket has never been opened there.
+async function cachedAttachments(ticketId) {
+  const c = await cfg();
+  return (c.attachLists || {})[handoffKey(c.cwOrigin, ticketId)] || null;
+}
+
 async function pushAttachments(ticketId, picks, onProgress) {
   const c = await cfg();
   const cap = Math.max(1, Number(c.maxUploadMb) || 500) * 1024 * 1024;
