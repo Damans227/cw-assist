@@ -798,18 +798,17 @@ $('openChat').onclick = async () => {
   }
 };
 
-/* ---- attachments -----------------------------------------------------
+/* ---- log analysis ----------------------------------------------------
 
-   Pushes anything ConnectWise has on the ticket that the model's terminal
-   hasn't already got, then opens the chat pointed at those paths. Files
-   already sent on a previous click are named in the prompt but not
-   re-uploaded — that is the whole reason the sandbox is used over a chat
-   attachment, which would have to be re-sent every time.
+   Lists what ConnectWise holds against the ticket, sends the ones you tick
+   to the model's terminal, then opens the chat pointed at those paths.
+   Anything already on the terminal from a previous run is named in the
+   prompt but not re-uploaded — that is the whole reason the sandbox is used
+   over a chat attachment, which would have to be re-sent every time.
 
-   When something is skipped we stop on the list rather than opening the
-   chat: opening a tab closes this panel, and an error nobody sees is not
-   an error report. The "Send anyway" button is there for when the missing
-   file doesn't matter.                                                   */
+   When something is skipped we stop on the result list rather than opening
+   the chat: opening a tab closes this panel, and an error nobody sees is
+   not an error report.                                                    */
 
 const fileSize = n =>
   n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB`
@@ -825,7 +824,7 @@ function renderAttachResult(res) {
     ? `<h4>Not sent</h4><ul class="err">${res.skipped.map(f =>
         `<li><code>${esc(f.filename)}</code> — ${esc(f.why)}</li>`).join('')}</ul>`
     : '';
-  const go = res.all.length && res.skipped.length
+  const go = res.all.length
     ? `<div class="ghactions"><button class="run" id="attachAnyway">Analyse the rest &rarr;</button></div>`
     : '';
   $('out').innerHTML = sent + bad + go;
@@ -844,13 +843,67 @@ function renderAttachResult(res) {
 
 $('attachRun').onclick = async () => {
   if (!ticket || busy) return;
-  busy = true;
   const b = $('attachRun');
   b.disabled = true;
   $('foot').textContent = '';
   $('out').innerHTML = '<span class="wait">Listing attachments…</span>';
   try {
-    const res = await pushAttachments(ticket, p => {
+    const state = await attachmentState(ticket);
+    if (!state.files.length) {
+      $('out').innerHTML = '<span class="idle">No attachments on this ticket.</span>';
+      return;
+    }
+    renderPickList(state);
+  } catch (e) {
+    $('out').innerHTML = `<span class="err">${esc(String(e.message || e))}</span>`;
+  } finally {
+    b.disabled = false;
+  }
+};
+
+// Everything is ticked to start with. A ticket often carries one screenshot
+// worth looking at and one 200 MB bundle that is not, so the point of the
+// list is being able to take things off it before anything moves.
+function renderPickList(state) {
+  const rows = state.files.map(f => `
+    <label class="pick-row">
+      <input type="checkbox" data-doc="${escAttr(f.id)}" checked>
+      <span class="pick-name">${esc(f.filename)}</span>
+      ${f.size ? `<span class="pick-size">${fileSize(f.size)}</span>` : ''}
+      ${f.sent ? '<span class="pick-tag">on terminal</span>' : ''}
+    </label>`).join('');
+
+  $('out').innerHTML = `
+    <div class="pick">
+      <h4>Attachments on ticket ${ticket}</h4>
+      ${rows}
+      <button class="pick-all" id="pickAll" type="button">Clear all</button>
+      <div class="ghactions"><button class="run" id="pickGo">Analyse &rarr;</button></div>
+    </div>`;
+
+  const boxes = () => [...$('out').querySelectorAll('input[data-doc]')];
+  const sync = () => {
+    const n = boxes().filter(b => b.checked).length;
+    $('pickGo').disabled = !n;
+    $('pickGo').textContent = n ? `Analyse ${n} file${n === 1 ? '' : 's'} \u2192` : 'Nothing picked';
+    $('pickAll').textContent = n ? 'Clear all' : 'Select all';
+  };
+  boxes().forEach(b => b.addEventListener('change', sync));
+  $('pickAll').onclick = () => {
+    const on = !boxes().some(b => b.checked);
+    boxes().forEach(b => { b.checked = on; });
+    sync();
+  };
+  $('pickGo').onclick = () => sendPicked(boxes().filter(b => b.checked).map(b => b.dataset.doc));
+  sync();
+}
+
+async function sendPicked(picks) {
+  if (busy) return;
+  busy = true;
+  $('attachRun').disabled = true;
+  try {
+    const res = await pushAttachments(ticket, picks, p => {
       // total is 0 when the server sends no length — show what has moved so
       // far and an indeterminate bar rather than a percentage we cannot know
       const pct = p.total ? Math.min(100, Math.round(p.loaded / p.total * 100)) : null;
@@ -867,19 +920,11 @@ $('attachRun').onclick = async () => {
         </div>`;
     });
 
-    if (!res.all.length && !res.skipped.length) {
-      $('out').innerHTML = res.total
-        ? '<span class="idle">Nothing to send — every attachment on this ticket is a ConnectWise email copy.</span>'
-        : '<span class="idle">This ticket has no attachments.</span>';
-      $('foot').textContent = '';
-      return;
-    }
-
     $('foot').textContent =
       `${res.uploaded.length} sent · ${res.all.length} on the terminal` +
       (res.skipped.length ? ` · ${res.skipped.length} skipped` : '');
 
-    if (res.skipped.length) { renderAttachResult(res); return; }
+    if (res.skipped.length || !res.all.length) { renderAttachResult(res); return; }
 
     const c = await cfg();
     await openHandoff({ prompt: buildAttachPrompt(c, ticket, res.all), terminalId: res.termId });
@@ -888,9 +933,9 @@ $('attachRun').onclick = async () => {
     $('foot').textContent = '';
   } finally {
     busy = false;
-    b.disabled = false;
+    $('attachRun').disabled = false;
   }
-};
+}
 
 /* ---- settings view ----------------------------------------------------
    Lives inside the panel (there is no popup). Reads/writes the same
@@ -1243,7 +1288,7 @@ async function renderSettings() {
       ${promptField('issue',    'GitHub issue draft')}
       ${promptField('handoff',         '“Open in chat” prompt — new chat')}
       ${promptField('handoffFollowup', '“Continue chat” prompt — chat already exists')}
-      ${promptField('attach',          '“Attachments” prompt — analyse what was sent')}
+      ${promptField('attach',          '“Log analysis” prompt — analyse what was sent')}
     </details>`;
 
   // generic bind for every [data-key] field

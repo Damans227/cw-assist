@@ -93,12 +93,17 @@ function promptVars(c, extra = {}) {
 
 /* ---- ConnectWise -------------------------------------------------- */
 
-async function apiFetch(path) {
+async function apiFetch(path, init = {}) {
   const { clientId, cwAppId } = await cfg();
   const { rest } = await cwUrls();
   const r = await fetch(`${rest}${path}`, {
+    ...init,
     credentials: 'include',
-    headers: { 'cw-app-id': (cwAppId || 'bm-manageclient'), ...(clientId ? { clientId } : {}) }
+    headers: {
+      'cw-app-id': (cwAppId || 'bm-manageclient'),
+      ...(clientId ? { clientId } : {}),
+      ...(init.headers || {})
+    }
   });
   if (r.status === 401 || r.status === 403) {
     throw new Error('ConnectWise rejected the request — reload a ConnectWise tab so the access key can be picked up.');
@@ -558,11 +563,11 @@ async function documents(ticketId) {
 const safeName = s =>
   String(s).replace(/[^\w.\-]+/g, '_').replace(/_+/g, '_').replace(/^[._]+/, '').slice(-120) || 'file';
 
-// Read in chunks rather than one await on .blob(): a support bundle takes
-// long enough that a caller with nothing to show looks hung. The cap is
-// checked off Content-Length first where ConnectWise sends one, so an
-// oversized file is never pulled into memory just to be rejected. Returns
-// { size } and no blob when it is too big to take.
+// Read in chunks rather than one await on .blob(). A support bundle takes
+// long enough that a caller with nothing to show looks hung, and since
+// ConnectWise sends these chunked with no Content-Length, counting bytes as
+// they arrive is also the only way the cap can bite — the read is abandoned
+// the moment it goes over. Returns { size } and no blob when it was too big.
 async function documentBytes(docId, cap, onProgress) {
   const r = await apiFetch(`/system/documents/${docId}/download`);
   const declared = Number(r.headers.get('content-length')) || 0;
@@ -636,18 +641,14 @@ function sandboxUpload(c, termId, dir, filename, blob, onProgress) {
   });
 }
 
-/* Pushes every attachment the sandbox has not already got, into its own
-   per-ticket directory. Returns what went, what did not and why, and the
-   full set now sitting there — a second click on the same ticket uploads
-   only what has landed on it since.                                      */
-async function pushAttachments(ticketId, onProgress) {
+/* What this ticket has, and which of it the sandbox is already holding.
+   Read on its own so the panel can show a pick list before anything moves. */
+async function attachmentState(ticketId) {
   const c = await cfg();
   const key = handoffKey(c.cwOrigin, ticketId);
   const already = { ...((c.sandboxUploads || {})[key] || {}) };
-  const cap = Math.max(1, Number(c.maxUploadMb) || 500) * 1024 * 1024;
 
   const docs = await documents(ticketId);
-  const uploaded = [], skipped = [];
   const { id: termId, home } = await sandbox(c);
   const dir = `${home}/cw-${ticketId}/`;            // created by the upload itself
 
@@ -661,46 +662,74 @@ async function pushAttachments(ticketId, onProgress) {
       `/v1/terminals/${termId}/files/list?directory=${encodeURIComponent(dir)}`)).json();
     onDisk = new Set((entries || []).map(e => e.name));
   } catch { /* no such directory yet */ }
-  for (const [id, rec] of Object.entries(already)) if (!onDisk.has(rec.name)) delete already[id];
-  const fresh = docs.filter(d => !already[d.id]);
 
-  if (fresh.length) {
-    for (let i = 0; i < fresh.length; i++) {
-      const d = fresh[i];
-      const step = phase => (loaded, total) =>
-        onProgress?.({ index: i + 1, of: fresh.length, name: d.filename, phase, loaded, total });
-      step('down')(0, 0);
-      try {
-        const { blob, size } = await documentBytes(d.id, cap, step('down'));
-        if (!blob) {
-          skipped.push({ ...d, why: `${(size / 1048576).toFixed(0)} MB — over the ${c.maxUploadMb} MB limit` });
-          continue;
-        }
-        // two CW documents can carry the same filename; the sandbox would
-        // silently overwrite, so make it unique before it goes
-        const taken = new Set(Object.values(already).map(a => a.name));
-        const base = safeName(d.filename);
-        let name = base, n = 1;
-        while (taken.has(name)) {
-          const dot = base.lastIndexOf('.');
-          name = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`;
-          n++;
-        }
-        const path = await sandboxUpload(c, termId, dir, name, blob, step('up'));
-        const rec = { name, path, size, at: Date.now() };
-        already[d.id] = rec;
-        uploaded.push({ ...d, ...rec });
-      } catch (e) {
-        skipped.push({ ...d, why: String(e.message || e) });
+  let pruned = false;
+  for (const [id, rec] of Object.entries(already)) {
+    if (!onDisk.has(rec.name)) { delete already[id]; pruned = true; }
+  }
+  if (pruned) {
+    await chrome.storage.local.set({ sandboxUploads: { ...(c.sandboxUploads || {}), [key]: already } });
+  }
+
+  /* Unsent files carry no size. ConnectWise answers HEAD with 405 and sends
+     every download chunked with no Content-Length, so the only way to learn
+     a file's size is to pull the whole thing — which is the transfer you are
+     trying to decide about. Files already on the terminal do have one; it
+     was counted on the way through.                                       */
+  const files = docs.map(d => ({ ...d, sent: !!already[d.id], ...(already[d.id] || {}) }));
+
+  return { termId, dir, key, already, files };
+}
+
+/* Sends the picked attachments the sandbox has not already got. `picks` is
+   a list of ConnectWise document ids; anything already there is left alone
+   but still comes back in `all`, which is what the prompt names.          */
+async function pushAttachments(ticketId, picks, onProgress) {
+  const c = await cfg();
+  const cap = Math.max(1, Number(c.maxUploadMb) || 500) * 1024 * 1024;
+  const { termId, dir, key, already, files } = await attachmentState(ticketId);
+
+  const wanted = new Set((picks || files.map(f => f.id)).map(String));
+  const chosen = files.filter(f => wanted.has(String(f.id)));
+  const fresh = chosen.filter(f => !already[f.id]);
+  const uploaded = [], skipped = [];
+
+  for (let i = 0; i < fresh.length; i++) {
+    const d = fresh[i];
+    const step = phase => (loaded, total) =>
+      onProgress?.({ index: i + 1, of: fresh.length, name: d.filename, phase, loaded, total });
+    step('down')(0, 0);
+    try {
+      const { blob, size } = await documentBytes(d.id, cap, step('down'));
+      if (!blob) {
+        skipped.push({ ...d, why: `${(size / 1048576).toFixed(0)} MB — over the ${c.maxUploadMb} MB limit` });
+        continue;
       }
+      // two CW documents can carry the same filename; the sandbox would
+      // silently overwrite, so make it unique before it goes
+      const taken = new Set(Object.values(already).map(a => a.name));
+      const base = safeName(d.filename);
+      let name = base, n = 1;
+      while (taken.has(name)) {
+        const dot = base.lastIndexOf('.');
+        name = dot > 0 ? `${base.slice(0, dot)}-${n}${base.slice(dot)}` : `${base}-${n}`;
+        n++;
+      }
+      const path = await sandboxUpload(c, termId, dir, name, blob, step('up'));
+      const rec = { name, path, size, at: Date.now() };
+      already[d.id] = rec;
+      uploaded.push({ ...d, ...rec });
+    } catch (e) {
+      skipped.push({ ...d, why: String(e.message || e) });
     }
   }
 
-  await chrome.storage.local.set({
-    sandboxUploads: { ...(c.sandboxUploads || {}), [key]: already }
-  });
+  // re-read rather than reuse `c`: attachmentState may have pruned since
+  const { sandboxUploads = {} } = await chrome.storage.local.get('sandboxUploads');
+  await chrome.storage.local.set({ sandboxUploads: { ...sandboxUploads, [key]: already } });
 
-  return { uploaded, skipped, all: Object.values(already), total: docs.length, termId, dir };
+  const all = chosen.filter(f => already[f.id]).map(f => already[f.id]);
+  return { uploaded, skipped, all, termId, dir };
 }
 
 // `files` is the record list from pushAttachments; the settings preview

@@ -37,10 +37,16 @@
   .sum{ margin:4px 0 0; font-size:14.5px; color:var(--mute);
         overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-  .board-toolbar{ display:flex; align-items:center; padding:10px 14px 0;
+  .board-toolbar{ display:flex; align-items:center; gap:12px; padding:10px 14px 0;
                   background:#fff; border-bottom:1px solid var(--line); }
-  .tabs{ display:flex; gap:20px; align-self:stretch; }
-  .tabs .tab{ font:inherit; font-size:14.5px; font-weight:500; padding:9px 1px 8px;
+  .tabs{ display:flex; gap:20px; align-self:stretch; flex:1 1 auto; min-width:0;
+         overflow-x:auto; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar{ display:none; }
+  /* the toolbar's own button: centred against the tab strip, not stretched
+     to its full height, and never shrunk by a long row of tabs */
+  .board-toolbar > .ghost{ align-self:center; margin-bottom:8px; }
+  .tabs .tab{ flex:none; white-space:nowrap;
+              font:inherit; font-size:14.5px; font-weight:500; padding:9px 1px 8px;
               border:none; border-bottom:2px solid transparent;
               background:transparent; color:var(--mute); cursor:pointer; }
   .tabs .tab:hover:not(.on){ color:var(--accent-dark); }
@@ -54,7 +60,7 @@
   .run.alt{ background:#fff; color:var(--accent-dark); border-color:var(--line); }
   .run.alt:hover:not(:disabled){ background:var(--accent-bg); border-color:var(--accent);
                                  color:var(--accent-dark); }
-  .ghost{ margin-left:auto; flex:none; font:inherit; font-size:14.5px; padding:6px 14px;
+  .ghost{ flex:none; font:inherit; font-size:14.5px; padding:6px 14px;
           white-space:nowrap; border:1px solid var(--line); border-radius:7px;
           background:#fff; color:var(--ink); cursor:pointer; }
   .ghost:hover:not(:disabled){ border-color:var(--accent); color:var(--accent); }
@@ -128,6 +134,18 @@
   .prog-bar.indet i{ width:35%; animation:slide 1.1s ease-in-out infinite; }
   @keyframes slide{ 0%{margin-left:-35%} 100%{margin-left:100%} }
   .prog-sub{ margin-top:6px; font-size:13px; color:var(--faint); }
+
+  /* attachment pick list */
+  .pick{ display:flex; flex-direction:column; gap:2px; }
+  .pick-row{ display:flex; align-items:baseline; gap:9px; padding:7px 2px;
+             border-bottom:1px solid var(--hair); font-size:14.5px; cursor:pointer; }
+  .pick-row:last-of-type{ border-bottom:0; }
+  .pick-row input{ margin:0; flex:none; align-self:center; accent-color:var(--accent); }
+  .pick-name{ flex:1; min-width:0; overflow-wrap:anywhere; color:var(--body); }
+  .pick-size{ flex:none; font-size:13px; color:var(--mute); font-variant-numeric:tabular-nums; }
+  .pick-tag{ flex:none; font-size:12.5px; color:var(--ok); font-weight:600; }
+  .pick-all{ font:inherit; font-size:13px; padding:0; border:0; background:none;
+             color:var(--accent); cursor:pointer; align-self:flex-start; }
   .ok a{ color:var(--ok); }
 
   /* GitHub issue draft editor */
@@ -209,7 +227,7 @@
   <button class="run" id="boardRun" hidden title="read every open ticket and ask the model again">Run summary</button>
   <div class="hbtns" id="tkBtns" hidden>
     <button class="run" id="openChat" hidden title="open this ticket in Open WebUI and ask for next steps">Open in chat &rarr;</button>
-    <button class="run alt" id="attachRun" hidden title="send this ticket's attachments to the model's terminal and ask it what they show">Attachments &rarr;</button>
+    <button class="run alt" id="attachRun" hidden title="pick attachments to put on the model's terminal, then ask it what they show">Log analysis &rarr;</button>
   </div>
 </header>
 

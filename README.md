@@ -14,11 +14,12 @@ and your own model (local Ollama/Open WebUI, or any OpenAI-compatible API).
 - **Issue draft** — turns a ticket into a ready-to-file GitHub issue.
 - **Open in chat** — hands the ticket off to your own chat UI (e.g. Open WebUI),
   with the ticket content pre-loaded.
-- **Attachments** — sends the ticket's attachments straight from ConnectWise
-  into Open WebUI's terminal sandbox and asks the model what they show. Logs,
-  screenshots and support bundles all go, because the model gets a real file
-  to open rather than a text extraction. Nothing is downloaded to your disk,
-  and a second click only sends what has landed on the ticket since the first.
+- **Log analysis** — lists the ticket's attachments, sends the ones you tick
+  straight from ConnectWise into Open WebUI's terminal sandbox, and asks the
+  model what they show. Logs, screenshots and support bundles all go, because
+  the model gets a real file to open rather than a text extraction. Nothing is
+  downloaded to your disk, and anything already on the terminal is not sent
+  twice.
 
 Every prompt above is a template you can override in Settings.
 
@@ -44,7 +45,7 @@ Open the side panel on a ConnectWise ticket, click **Settings**.
 | AI key | Only if your endpoint needs one. |
 | Vendor name | Who "we" refers to in the prompts. Leave blank for "our team". |
 | Domain focus | A one-liner on what your team supports, e.g. "Apache CloudStack". Steers the AI's read of tickets. |
-| Attachment size limit | Per-file cap for the Attachments button, 500 MB by default. |
+| Attachment size limit | Per-file cap for the Log analysis button, 500 MB by default. |
 | GitHub token | Only needed for the issue-draft feature. |
 | GitHub repos | The repos you want to file issues against. |
 
@@ -68,7 +69,7 @@ Settings panel → footer has Export and Import, so you can move your setup
 between machines or back it up as a JSON file. Keys/tokens are asked about
 before being included.
 
-## Attachments
+## Log analysis
 
 Needs Open WebUI's terminal feature. The extension finds the terminal and its
 home directory on its own, drops each ticket's files in `~/cw-<ticket>/`, and
